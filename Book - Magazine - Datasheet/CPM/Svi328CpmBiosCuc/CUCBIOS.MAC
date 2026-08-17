@@ -1,0 +1,3827 @@
+topram	equ	endmem		!
+begtrl	equ	translt		!
+coldlen	equ	endcold-cboot	!
+
+page 92
+title Spectravideo C.U.C.'s CP/M 2.2 BIOS voor de SV.328 versie 1.8 (DT)
+
+;******************************************************************************
+;*									      *
+;*  CP/M 2.2 BIOS voor de Spectravideo SV.328 met 2 (40/80 tracks) disk       *
+;*									      *
+;*  drives (TEAC FD55) plus 80 kolomskaart en eventueel een RS-232 interface  *
+;*									      *
+;*  en/of een 64k RAM kaart.   						      *
+;*									      *
+;*  Copyright Peter Zevenhoven 1986-1987				      *
+;*									      *
+;******************************************************************************
+
+subttl constanten
+.z80
+	;I/O poorten
+
+fdcstat	equ	30h		;FD-1793 status register		   (I)
+fdccomm	equ	30h		;	 commando register		   (O)
+fdctrck	equ	31h		;	 track register			  (I/O)
+fdcsect	equ	32h		;	 sector register		  (I/O)
+fdcdata	equ	33h		;	 data register			  (I/O)
+fdcdrq	equ	34h		;	 DRQ en INTRQ pennen		   (I)
+fddrsel	equ	34h		;disk-drive select en motor uitgangen	   (O)
+sidesel	equ	38h		;disk-drive side en FD density select	   (O)
+
+vdpreg	equ	81h		;schrijft naar TMS-9928 interne registers  (O)
+vdpstat	equ	85h		;leest TMS-9928 status register		   (I)
+
+crtadr	equ	50h		;adresseert 6845 intern register 	   (O)
+crtdata	equ	51h		;leest of schrijft 6845 register	  (I/O)
+crtbank	equ	58h		;schakelt 6845 VRAM in F000h-F7FFh	   (O)
+crtvram	equ	0F000h		;beginadres van CRT VRAM
+
+pio1awr	equ	60h		;Datenregister  PIO 1, Port A		  (I/O)
+pio1bwr	equ	61h		;Datenregister  PIO 1, Port B		  (I/O)
+pio1acr	equ	62h		;Steuerregister PIO 1, Port A		   (O)
+pio1bcr	equ	63h		;Steuerregister PIO 1, Port B              (O)
+pio2awr	equ	64h		;Datenregister  PIO 2, Port A             (I/O)
+pio2bwr	equ	65h		;Datenregister  PIO 2, Port B             (I/O)
+pio2acr	equ	66h		;Steuerregister PIO 2, Port A              (O)
+pio2bcr	equ	67h		;Steuerregister PIO 2, Port B              (O)
+
+pio_cr	equ	pio1bcr		;Hier die tatsaechlich verwendeten Ports   (O)
+pio_wr	equ	pio1bwr		;eintragen (Steuer/Datenregister)         (I/O)
+
+;Verwendung des Ports:		Bit   7: Umschaltung SVI     (0) - IBM     (1)
+;				Bit   6: Umschaltung Deutsch (0) - Englisch(1)
+;				Bit   5: Umschaltung 3/6 MHz (geplant)
+;				Bit 1-4: Drive Select        (geplant) 
+;				Bit   0: Kaffeemaschine ein/aus (frei)
+
+psgsel	equ	88h		;selecteert AY-3-8910 register 		   (O)
+psgwr	equ	8Ch		;schrijft naar geselecteerd PSG register   (O)
+psgrd	equ	90h		;leest geselecteerd PSG register	   (I)
+
+rdppia	equ	98h		;leest 8255 PPI's poort A		   (I)
+rdppib	equ	99h		;leest PPI's poort B			   (I)
+rdppic	equ	9Ah		;leest PPI's poort C			   (I)
+wrppic	equ	96h		;schrijft naar PPI's poort C		   (O)
+wrppicr	equ	97h		;schrijft naar PPI's controle register	   (O)
+
+rs_recv	equ	28h		;leest 8250 ACIA's (RS-232) ontvangen data (I)
+rs_tran	equ	28h		;schrijft naar transmit register	   (O)
+rs_divl	equ	28h		;lage byte van deler       (als bit 7 van line)
+rs_divh	equ	29h		;hoge byte van deler       (control 1 is)  (O)
+rs_iren	equ	29h		;interrupt enable register		   (O)
+rs_irid	equ	2Ah		;interrupt identification register	   (I)
+rs_linc	equ	2Bh		;line control register			   (O)
+rs_modc	equ	2Ch		;modem control register			   (O)
+rs_lins	equ	2Dh		;line status register			   (I)
+rs_mods	equ	2Eh		;modem status register			   (I)
+
+lptdata	equ	10h		;printår data register			   (O)
+lptstrb	equ	11h		;printer strobe output (bit 0)		   (O)
+lptbusy	equ	12h		;printer busy input (bit 0)		   (I)
+
+
+	;CP/M constanten
+iobyte	equ	3		;het IObyte
+bios	equ	0E600h		;begin van de BIOS
+bdos	equ	0D806h		;begin van de BDOS
+ccp	equ	0D000h		;begin van de CCP
+
+
+	;diversen
+keyblen	equ	16		;toetsenbordbufferlengte
+autores	equ	25		;autorepeat teller waarde na een nieuwe toets
+autorrp	equ	3		;autorepeat herhaal waarde
+
+checksm	equ	048E4h		;de verlangde checksum over CCP en BDOS
+
+;Om bytes te sparån (en iets aan snelheid te winnen) worden (waar mogelijk)
+;de variabelen niet in het aparte werkgeheugen gezet, maar in de operand
+;van een van de instructies die van deze variabelen gebruik maken.
+;Tevens wordt regelmatig de opcodes van sommige instructies aangepast om een
+;bepaald programmadeel wel of niet uit te voeren
+
+;------------------------------------------------------------------------------
+subttl Adressentabel
+page
+	;tabel met adressen (relatief ten opzichte van het begin) voor de 
+	;PASCAL utility
+
+coldoff	equ	cboot-colds-begin
+biosoff	equ	bios-begbios-begin
+
+begin:	jp	0			;BIOS.COM niet uitvoerbaar
+	nop
+
+	dw	colds-begin		;beginadres cold start loader	   ( 2)
+	dw	begbios-begin		;beginadres van de BIOS		   ( 3)
+	dw	recbuf-biosoff		;beginpunt voor de te kopieeren    ( 4)
+					;CCP en BDOS
+	dw	cbegsc+1-coldoff	;1e COLD BOOT sector op track nul  ( 5)
+	dw	cbegsc+2-coldoff	;aantal COLD BOOT sectoren 	   ( 6)
+	dw	hicsec+1-coldoff	;hoogste sectornummer per track    ( 7)
+
+	dw	dphdra+10-biosoff	;default drive DPB voor drive A	   ( 8)
+
+	dw	crtins-coldoff		;CRT instellingen		   ( 9)
+
+	dw	nors232-coldoff		;20h (wel) of 18h (geen) RS232 	   (10)
+					;gebruikt toegestaan (indien aanwezig)
+
+	dw	noext64-coldoff		;20h (wel) of 18h (geen) gebruik   (11)
+					;eventuele extra 64K RAM toegestaan
+	dw	minpbuf+1-coldoff	;beginadres printerbuffer in 64K   (12)
+	dw	maxpbuf+1-coldoff	;eindadres printerbuffer in 64K    (13)
+
+	dw	dphdrb+10-biosoff	;default drive DPB voor drive B    (14)
+
+	dw	dpbdra-biosoff		;drive A parameters		   (15)
+
+	dw	driveao-biosoff		;toegestane formaten voor A	   (16)
+	dw	drivebo-biosoff		;toegestane formaten voor B 	   (17)
+
+	dw	wabtrs+1-biosoff	;WBOOT load begin TRACK		   (18)
+	dw	wabtrs+2-biosoff	; ''    ''   ''   RECORD	   (19)
+	dw	wamaxs+1-biosoff	; ''    ''  hoogste RECORD	   (20)
+	dw	wamaxt+1-biosoff	; ''    ''  hoogste TRACK	   (21)
+
+	dw	bufl1+1-biosoff		;aantal buffers bij 256 byte sect. (22)
+	dw	translt-biosoff		;begin sector vertaal tabel	   (23)
+	dw	transln       		;lengte van die tabel		   (24)
+
+	dw	baudrt-biosoff		;baudrate deelfactoren tabel	   (25)
+	dw	baudtx-biosoff		;decimale weergave baudrate tabel  (26)
+	dw	bdidx+1-biosoff		;default baudrate index		   (27)
+	dw	sformat+1-biosoff	;default line control register	   (28)
+
+	dw	normkey-biosoff		;begin toetsenbord tabel	   (29)
+	dw	restore+1-biosoff	;0..3, stappenmotorsnelheid	   (30)
+	dw	fkey-biosoff		;functietoets inhoud tabel	   (31)
+	dw	fkey			;geheugenadres hiervan		   (32)
+	dw	fktxt+1-biosoff		;functietoets tekst tabel	   (33)
+	dw	fktxt+1			;geheugenadres hiervan		   (34)
+	dw	curstrt+1		;geheugenadres van 37		   (35)
+
+	dw	translt  		;geheugenadres van (23)    	   (36)
+
+	dw	curstrt+1-biosoff	;cursor blok (60h) / line (67h)	   (37)
+	dw	crtins+10-coldoff	;cursor blok (60h) / line (47h)	   (38)
+
+	dw	formata			;geheugenadres drive A formaat	   (39)
+	dw	formatb			;geheugenadres drive B formaat	   (40)
+
+	dw	nocuoff-biosoff		;3E cursor uit na print (C9 niet)  (41)
+
+	dw	1			;1: SVI SS \                       (42)
+	dw	2			;2: SVI DS  \	 		   (43)
+	dw	3			;3: CUCs40   \			   (44)
+	dw	4			;4: CUCd40    \			   (45)
+	dw	5			;5: CUCs80     > default formaten  (46)
+	dw	6 			;6: CUCd80    /  		   (47)
+	dw	7			;7: MAXs40   /			   (48)
+	dw	8			;8: MAXd40  /			   (49)
+
+	dw	0		;drive A --> 0: enkelzijdig  40 tracks	   (50)
+				;	     1: dubbelzijdig 40 tracks
+				;	     2: enkelzijdig  80 tracks
+				;	     3: dubbelzijdig 80 tracks
+				;	     4: enkelz.  80, niet omschakelbaar
+				;	     5: dubbelz. 80, niet omschakelbaar
+
+	dw	0		;drive B				   (51)
+
+	dw	stopdrv		;geheugenadres drive/motor uit teller	   (52)
+
+	dw	chtrck+1	;geheugenadres 40/80 track latches	   (53)
+
+	dw	olddrv  	;geheugenadres drive select kopie	   (54)
+
+	dw	achgd		;geheugenadres drive A formaat veranderd   (55)
+
+	dw	bchgd		  ;geheugenadres drive B formaat veranderd (56)
+
+	dw	revisie		  ;geheugenadres revisie nummer		   (57)
+
+	dw	revisie-biosoff	  ;plaats in CB.SYS hiervan		   (58)
+
+	dw	sysfrmt+1-biosoff ;ook hier moet systeem DPB adres komen   (59)
+
+	dw 	dpbdra		  ;geheugenadres van 15			   (60)
+
+	dw	trckra		  ;bewaarde drive A trackregister	   (61)
+
+	dw	trckrb		  ;bewaarde drive B trackregister	   (62)
+
+	dw	0000000001111b    ;actieve users (sub directory simulatie) (63)
+
+	dw	lstdly+1-biosoff  ;Adresse: Delay fuer warten auf BUSY     (64)
+	dw	lstdly+1          ; die Speicheradresse hiervon            (65)
+
+	dw	pioinit+1-biosoff ;PIO Steuerregister			   (66)
+	dw	pioinit+1	  ; die Speicheradresse hiervon		   (67)
+	dw	pioport+1-biosoff ;PIO Datenregister			   (68)
+	dw	pioport+1	  ; die Speicheradresse hiervon		   (69)
+;------------------------------------------------------------------------------
+subttl Koude start
+page
+colds:
+	.phase 0C100h
+
+	;Nadat het SV.328 ROM de sector 1 van track 0 (single density) op
+	;C100h neergezet heeft, wordt hierheen gesprongen. Deze sector is 
+	;bij Spectravideo 128 bytes lang maar bij deze BIOS 512 bytes.
+
+cboot:	di
+	ld	bc,0A081h	;VDP interrupt inschakelen
+	out	(c),b
+	out	(c),c
+
+	ld	hl,bios		;daar waar de BIOS neergezet gaat worden
+	ld	sp,hl		;reset stackpointer
+
+cbegsc:	ld	de,256*18+11	;D=aantal in te lezen sectoren, E=1e sector
+
+cboots:	xor	a		;kies Double Density/Side 0/40 tracks..
+	out	(sidesel),a
+
+	ld	a,e		;zet SECTOR register
+	out	(fdcsect),a
+
+	ex	(sp),hl
+	ex	(sp),hl
+
+	ld	a,80h		;READ SECTOR commando
+	out	(fdccomm),a
+
+	ex	(sp),hl
+	ex	(sp),hl
+
+	ld	c,fdcdata	;FDC DATA poort
+
+waidrq:	in	a,(fdcdrq)	;lees INTRQ en DRQ aansluitingen
+	add	a,a		;klaar?
+	jr	c,csectr
+	jp	p,waidrq	;geen byte? wacht
+	ini			;lees byte
+	jr	waidrq		;volgende
+
+csectr:	in	a,(fdcstat)	;sector goed ingelezen?
+	and	1Ch
+	jr	nz,cboots	;nee, nog eens proberen
+
+	dec	d		;klaar?
+	jr	z,scold		;ja, stop
+
+	inc	e		;verhoog sectornummer
+	ld	a,e
+hicsec:	cp	18		;te hoog?
+	jr	nz,cboots
+	ld	e,1		;reset sectornummer
+
+	ld	a,50h		;STEP IN inclusief TRACK update en verify
+	out	(fdccomm),a
+
+	ex	(sp),hl
+	ex	(sp),hl
+	ex	(sp),hl
+	ex	(sp),hl
+
+waistp:	in	a,(fdcstat)	;wacht tot FDC 1 track verder is
+	rra
+	jr	c,waistp
+
+	jr	cboots
+
+
+scold:	ld	a,15		;selecteer pagina 21 en 02
+	out	(psgsel),a
+	out	(pio_cr),a	;und PIO auf Ausgabe einstellen
+pioinit	equ	$-1
+	ld	a,0DDh
+	out	(psgwr),a
+
+	ld	hl,3
+	ld	(hl),81h	;set IObyte
+	inc	hl
+	ld	(hl),h		;clear user en default drive
+
+	ld	l,38h		;interrupt doet even niets
+	ld	(hl),0C9h
+
+	ld	hl,autorep		;wis variabelen
+	ld	b,trycnt-autorep+1
+
+	xor	a
+clrvar:	ld	(hl),a
+	inc	hl
+	djnz	clrvar
+	
+	dec	a
+	ld	(achgd),a
+	ld	(bchgd),a
+
+	ld	b,22		;wis toetsenbord debounce buffer
+inideb:	ld	(hl),a
+	inc	hl
+	djnz	inideb
+
+	ld	(stopdrv),hl	;reset drive select teller
+
+	ld	hl,crtins	;6845 CRT initialiseren vanuit tabel
+	ld	bc,16*256+crtdata
+	xor	a
+crtinl:	out	(crtadr),a	;selecteer een 6845 register
+	inc	a
+	outi			;schrijf byte uit tabel naar dat register
+	jr	nz,crtinl	;volgende
+
+	ld	b,127
+ch232:	ld	a,b
+	out	(rs_linc),a	;kijk of er een RS-232 interface is
+	ex	(sp),hl
+	ex	(sp),hl
+	in	a,(rs_linc)
+	cp	b
+nors232:jr	nz,chext64	;nee, kijk naar extra 64K
+	djnz	ch232
+
+	ld	a, rdirid - jints - 2	;offset in IRQ routine aanpassen
+	ld	(jints + 1), a
+
+	ld	a,-96		;spatie
+	ld	(nors),a
+
+	ld	a,low (crtvram + 24*80 + 4)	;formaat regel naar links
+	ld	(frmpos+1),a
+
+	call	initrs		;initialiseer RS-232
+
+	out	(rs_iren),a	;enable RS-232 zend en ontvang interrupt
+
+
+	;even kijken of er extra 64K RAM is
+chext64:ld	a,11010111b	;selecteer pagina 31 en 02
+	out	(psgwr),a
+
+	ld	h,7Fh
+ch64k:	ld	a,(hl)
+	cpl
+	ld	(hl),a
+	sub	(hl)
+noext64:jr	nz,restb20	;geen 64K RAM? alles zo laten
+	dec	h
+	jr	nz,ch64k
+
+	ld	a,11h		;opcode LD DE, data
+	ld	(clixev),a
+
+	call	clixev		;bereken aantal sectorbuffers + wis sectorindex
+
+	ld	a,0CDh		;opcode CALL
+	ld	(bank20),a
+	ld	(bank32),a
+
+	ld	hl,0AFAFh
+	ld	(flush),hl
+	ld	(flush+2),hl
+
+	ld	a,03Eh		;opcode LD A,data
+	ld	(notinb),a
+	ld	(evdirc),a
+
+	ld	a,32h		;opcode LD (adres),A
+	ld	(dirc64),a
+	ld	(stchinb),a
+
+	ld	a,0D3h		;bank 22/31 selecteer byte
+	ld	(selbnk1+2),a
+
+	ld	a,0F3h		;idem met CAPS LOCK lamp aan
+	ld	(selbnk2+2),a
+
+minpbuf:ld	hl,recbuf	;vergroot de printerbuffer (laagste waarde)
+	ld	(spoollo+1),hl
+	ld	(chspbuf+1),hl
+	ld	(spoolpr+1),hl
+
+maxpbuf:ld	hl,splend	;hoogste waarde printerbuffer
+	ld	(incspl+2),hl
+
+	ld	hl,0C000h
+	ld	d,l
+	ld	e,l
+	ld	bc,3FFFh
+	ldir			;kopieer BIOS naar pagina 31
+	
+	jp	bios22-0C000h	;kopieer BIOS naar pagina 22
+
+	;dit stukje 'draait' in pagina 31..
+
+bios22:	out	(psgwr),a	;selecteer page 31 en 22
+	ex	de,hl
+	ld	b,40h
+	lddr
+	jp	restb20		;terugschakelen
+
+	;----------------------------------
+
+restb20:ld	a,0DDh
+	out	(psgwr),a	;normale RAM terugschakelen
+
+	call	erafnk		;functietoetsregel wissen
+
+	ld	hl,intro	;print introductietekst
+printro:ld	c,(hl)
+	push	hl
+	call	crtout
+	pop	hl
+	inc	hl
+	ld	a,l
+	cp	low crtins
+	jr	nz,printro
+	jp	wboot
+
+
+	;introductietekst
+intro:	db	12, 'CP/M 2.2', 13,10
+	db	    'Copyright by Digital Research', 13,10,10 
+	db	    'Spectravideo C.U.C. BIOS 1.8 DT', 13,10
+	db	    'Copyright by P.Zevenhoven', 13,10
+
+	;6845 CRT instellingen
+crtins:	db	6Ch, 50h, 58h, 0Bh, 26h, 02h, 19h, 1Fh
+	db	00h, 07h, 60h, 07h, 00h, 00h, 00h, 00h
+
+
+	;zoek naar 'AUTOEXEC.COM' op drive A
+
+seauto:	pop	hl		;na 1e keer AUTOEXEC zoekactie negeren
+	dec	hl
+	ld	(hl),high cbottom
+	dec	hl
+	ld	(hl),low cbottom
+	dec	hl
+	push	hl
+
+	ld	a,28h		;ev. bij warme start CCP en BDOS niet laden
+	ld	(jrccs),a
+
+	ld	c,13		;reset disk system
+	call	5
+
+	ld	c,14
+	ld	e,0
+	call	5		;selecteer drive A
+
+	ld	c,17
+	ld	de,fcb		;zoek naar 'AUTOEXEC.COM'
+	push	de
+	call	5
+	pop	hl
+	inc	a
+	ret	z		;niet? stop hier
+
+	ld	de,keybuf	;zet 'AUTOEXEC' in de toetsenbordbuffer
+	ld	bc,8
+	inc	hl
+	ldir
+	ex	de,hl
+	ld	(hl),13		;+carriage return
+	inc	hl
+	ld	(keybidx+1),hl
+	ret			;klaar
+
+
+	;File Control Block voor AUTOEXEC directory zoekactie
+fcb:	db	0,'AUTOEXECCOM',0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+
+endcold:
+	.dephase
+
+;------------------------------------------------------------------------------
+subttl BIOS entry points en disk parameters
+page
+begbios:
+	.phase bios		;BIOS begin adres in Spectravideo computers
+
+	jp	boot		;herstart
+	jp	wboot		;warme start
+	jp	const		;geef console status
+	jp	conin		;haal teken van console
+	jp	conout		;print teken naar console
+	jp	list		;print teken naar LST:
+	jp	punch		;teken naar PUN:
+	jp	reader		;teken van RDR:
+	jp	home		;disk-drive naar track 00
+	jp	seldsk		;select disk
+	jp	settrk		;zet disk track
+	jp	setsec		;zet disk sector
+	jp	setdma		;zet DMA adres
+	jp	read		;lees sector
+	jp	write		;schrijf sector
+	jp	listst		;geef LST: status
+	jp	sectran		;tranformeer logische naar fysieke sector
+
+
+	;disk parameter headers (zie voor uitgebreide documentatie het bij de
+	;SVI computers meegeleverde CP/M boek van Digital Research)
+
+	;drive A
+dphdra:	dw	0		;geen sector vertaling
+	ds	6		;geserveerd voor BDOS
+	dw	dirbuf		;adres voor directory buffer
+	dw	dpbdra		;adres van drive parameter block
+	dw	chkvca		;adres van check vector
+	dw	chalva		;allocation vector              
+
+	;drive B
+dphdrb:	dw	0		;geen sector vertaling          
+	ds	6       	;geserveerd voor BDOS           
+	dw	dirbuf  	;adres voor directory buffer    
+	dw	dpbdra  	;adres van drive parameter block
+	dw	chkvcb  	;adres van check vector         
+	dw	chalvb  	;allocation vector              
+
+
+	;Acht drive parameter blokken, drive A en B kunnen op een ervan in-
+	;gesteld worden
+
+	;De waarden in deze tabellen kunnen door een externe utility op totaal
+	;andere formaten ingesteld worden.
+
+	;Het disk formaat specificatiebyte bepaalt de hardware situatie voor
+	;de RDSEC en WRSEC routines.
+
+	;bit 0 = 1: bij double density
+	;bit 1 =    niet (meer) in gebruik
+
+	;bit 2 = 1: bij 80 tracks
+	;bit 3 =    niet (meer) in gebruik
+
+	;bit 4 = 1: bij double sided drives, waarbij de even tracknummers
+	;	    onder en de oneven tracknummers boven zitten
+
+	;bit 5 = 1: bij de C.U.C. formaten (sector 6 halve lengte)
+
+	;bit 6 = 1: bij drives met een aantal [1..X] sectoren onder en de
+	;	    rest [X+1..Y] boven (o.a. bij C.U.C. formaat)
+
+	;bit 7 = 1: wanneer de FDC data geinverteerd dient te worden (bijv.
+	;	    bij Grundig met FD-1791) 
+
+
+	;drive parameter blok A
+	;enkelzijdig 40 tracks SVI formaat
+
+dpbdra:	dw	34		;aantal CP/M records per track
+	db	3 		;block shift
+	db	7 		;block mask
+	db 	0		;extend mask
+	dw	156		;disk size-1 (blocks)
+	dw	63 		;max. directory size
+	db	0C0h		;directory allocation 0
+	db	0		;directory allocation 1
+	dw	16		;check size
+	dw	3		;gereserveerde tracks
+
+	;extra voor deze BIOS
+	db	1		;sector shift
+	db	1		;sector mask
+	db	00000001b	;formaat byte
+	db	0		;aantal sectoren onder (indien bit 6 van het
+				;                            formaat byte 1 is)
+	dw	0		;adres ev. sector vertaal tabel (<0) of sector
+				;BIAS (0 of 1); het nummer van de 1e sector
+	db	'SVI SS'	;de naam van het formaat
+
+
+	;drive parameter blok B
+	;SVI dubbelzijdig 40 tracks formaat
+
+dpbdrb: dw	34		;aantal CP/M records per track
+	db	4 		;block shift
+	db	15		;block mask
+	db 	1		;extend mask
+	dw	162		;disk size-1 (blocks)
+	dw	63 		;max. directory size
+	db	080h		;directory allocation 0
+	db	0		;directory allocation 1
+	dw	16		;check size
+	dw	3		;gereserveerde tracks
+
+	;extra voor deze BIOS
+	db	1		;sector shift
+	db	1		;sector mask
+	db	00000001b	;formaat byte
+	db	0		;1e sector boven
+	dw	0		;adres ev. sector vertaal tabel
+	db	'SVI DS'	;naam
+
+
+	;disk parameter blok C
+	;C.U.C. 80 tracks dubbelzijdig formaat
+
+dpbdrc: dw	88		;aantal CP/M records per track
+	db	4		;block shift
+	db	15		;block mask
+	db 	0		;extend mask
+	dw	433		;disk size-1 (blocks)
+	dw	255 		;max. directory size
+	db	0F0h		;directory allocation 0
+	db	0		;directory allocation 1
+	dw	64		;check size
+	dw	1		;gereserveerde tracks
+
+	;extra voor deze BIOS
+	db	3		;sector shift
+	db	7		;sector mask
+	db	01100101b	;formaat byte
+	db	7		;1e sector boven
+	dw	0		;adres ev. sector vertaal tabel
+	db	'CUCd80'	;naam
+
+
+	;disk parameter blok D
+	;C.U.C. 40 tracks dubbelzijdig formaat
+
+dpbdrd: dw	88		;aantal CP/M records per track
+	db	4		;block shift
+	db	15		;block mask
+	db 	1		;extend mask
+	dw	213		;disk size-1 (blocks)
+	dw	127 		;max. directory size
+	db	0C0h		;directory allocation 0
+	db	0		;directory allocation 1
+	dw	32		;check size
+	dw	1		;gereserveerde tracks
+
+	;extra voor deze BIOS
+	db	3		;sector shift
+	db	7		;sector mask
+	db	01100101b	;formaat byte
+	db	7		;1e sector boven
+	dw	0		;adres ev. sector vertaal tabel
+	db	'CUCd40'	;naam
+
+	;disk parameter blok E
+	;C.U.C. 40 tracks enkelzijdig formaat
+
+dpbdre: dw	44		;aantal CP/M records per track
+	db	3		;block shift
+	db	7		;block mask
+	db 	0		;extend mask
+	dw	208		;disk size-1 (blocks)
+	dw	63 		;max. directory size
+	db	0C0h		;directory allocation 0
+	db	0		;directory allocation 1
+	dw	16		;check size
+	dw	2		;gereserveerde tracks
+
+	;extra voor deze BIOS
+	db	3		;sector shift
+	db	7		;sector mask
+	db	00000001b	;formaat byte
+	db	0		;1e sector boven
+	dw	0		;adres ev. sector vertaal tabel
+	db	'CUCs40'	;naam
+
+
+	;disk parameter blok F
+	;maximum voor dubbelzijdig 80
+
+dpbdrf: dw	88		;aantal CP/M records per track
+	db	4		;block shift
+	db	15		;block mask
+	db 	0		;extend mask
+	dw	439		;disk size-1 (blocks)
+	dw	255 		;max. directory size
+	db	0F0h		;directory allocation 0
+	db	0		;directory allocation 1
+	dw	64		;check size
+	dw	0		;gereserveerde tracks
+
+	;extra voor deze BIOS
+	db	3		;sector shift
+	db	7		;sector mask
+	db	01100101b	;formaat byte
+	db	7		;1e sector boven
+	dw	0		;adres ev. sector vertaal tabel
+	db	'MAXd80'	;naam
+
+
+	;disk parameter blok G
+	;maximum voor dubbelzijdig 40
+
+dpbdrg: dw	88		;aantal CP/M records per track
+	db	4		;block shift
+	db	15		;block mask
+	db 	1		;extend mask
+	dw	219		;disk size-1 (blocks)
+	dw	127 		;max. directory size
+	db	0C0h		;directory allocation 0
+	db	0		;directory allocation 1
+	dw	32		;check size
+	dw	0		;gereserveerde tracks
+
+	;extra voor deze BIOS
+	db	3		;sector shift
+	db	7		;sector mask
+	db	01100101b	;formaat byte
+	db	7		;1e sector boven
+	dw	0		;adres ev. sector vertaal tabel
+	db	'MAXd40'	;naam
+
+
+	;disk parameter blok H
+	;maximum voor enkelzijdig 40
+
+dpbdrh: dw	44		;aantal CP/M records per track
+	db	3		;block shift
+	db	7		;block mask
+	db 	0		;extend mask
+	dw	219		;disk size-1 (blocks)
+	dw	63 		;max. directory size
+	db	0C0h		;directory allocation 0
+	db	0		;directory allocation 1
+	dw	16		;check size
+	dw	0		;gereserveerde tracks
+
+	;extra voor deze BIOS
+	db	3		;sector shift
+	db	7		;sector mask
+	db	00000001b	;formaat byte
+	db	0		;1e sector boven
+	dw	0		;adres ev. sector vertaal tabel
+	db	'MAXs40'	;naam
+
+driveao:db	11111111b	;bit 0=1: drive formaat A toegestaan (dpbdra)
+				;bit 1=1: drive formaat B toegestaan (dpbdrb)
+				;enzovoorts
+drivebo:db	11111111b
+
+revisie:db	24		;revisienummer van deze BIOS versie
+
+;------------------------------------------------------------------------------
+
+	;CP/M koude start
+boot:	call	psg15
+	cpl			;schakel ROM in
+	out	(psgwr),a
+	rst	0		;RESET
+
+subttl Warme start
+page
+	;warme start
+wboot:	di
+	ld	sp,ccp-2
+
+	xor	a
+	ld	(stcklvl+1),a	;wis stack level
+	ld	l,a
+	ld	h,a		;HL=0
+
+	ld	a,0C3h
+
+	ld	(hl),a		;JP 0 springt naar WBOOT
+	inc	hl
+	ld	(hl), low (bios+3)
+	inc	hl
+	ld	(hl),high (bios+3)
+
+	ld	l,5		;CALL 5 roept BDOS aan
+	ld	(hl),a
+	inc	hl
+	ld	(hl), low bdos
+	inc	hl
+	ld	(hl),high bdos
+
+	ld	l,38h		;zet de IRQ vector
+	ld	(hl),a
+	inc	hl
+	ld	(hl), low intreq
+	inc	hl
+	ld	(hl),high intreq
+
+	call	flush		;ev. veranderde sectoren alsnog schrijven
+
+	call	chcksum		  ;zijn CCP en BDOS nog onaangetast? Ja,
+jrccs:	ld	a,gotoccp-jrccs-2 ;(JR Z na COLD BOOT)    niet van schijf laden
+
+sysfrmt:ld	hl,dpbdra	;zet A eventueel op systeemdisk gegevens
+	ld	a,(dphdra+10)
+	cp	l		;systeem formaat ongewijzigd?
+	jr	z,selwd		;ja, ok
+
+	ld	(achgd),a	;zet formaat A gewijzigd vlag
+
+	ld	(dphdra+10),hl
+	call	clixev		;bereken nieuw aantal buffers
+
+selwd:	ld	c,0
+	call	seldsk		;selecteer drive A
+
+	ld	hl,ccp		;daar gaat de CCP heen
+wabtrs:	ld	de,44*256+0	;begin op track 0, record 44
+
+boot1:	ld	(curdma+1),hl	;doeladres
+	push	hl
+	ld	c,e
+	call	settrk		;momentele track
+	ld	c,d
+	push	de
+	call	setsec		;en sector
+	call	read		;lees sector
+	pop	de
+	pop	hl
+	or	a
+	jr	nz,booterr	;leesfout? Boot error
+
+	ld	bc,128
+	add	hl,bc		;verhoog DMA adres
+
+	inc	d		;verhoog sector
+	ld	a,d
+wamaxs:	sub	88		;einde track?
+	jr	nz,boot1	;nee, volgende sector
+	ld	d,a		;ja, sector =0
+	inc	e		;verhoog track
+	ld	a,e
+wamaxt:	cp	1		;klaar?
+	jr	nz,boot1	;nee, volgende sector
+
+	call	chcksum		;CCP en BDOS goed geladen?
+
+booterr:ld	de,nosysds
+	jp	nz,error	;foutmelding en wacht op toets
+
+	call	relogi		;(her) LOGIN A drive
+
+gotoccp:ld	hl,keybidx+1	;leeg toetsenbordbuffer
+	ld	(hl),low keybuf
+
+	call	seauto		;zoek 'AUTOEXEC.COM', na eerste keer: 
+				;CALL CBOTTOM: geef gereserveerde buffers vrij
+	ld	bc,128
+	call	setdma		;default DMA adres
+
+	ld	a,03Eh		;zorg ervoor dat de eerstvolgende directory
+	ld	(dodirc),a	;sector altijd gelezen wordt
+
+	xor	a
+	ld	(0D007h),a	;wis CCP's invoer buffer
+
+	ld	bc,(4)		;huidige USER en default DRIVE
+	jp	ccp
+
+	;foutmelding na warme start zonder correcte systeemdisk
+nosysds:db	'Boot error', 0
+
+;------------------------------------------------------------------------------
+subttl Interrupt routine
+page
+	;omdat de Z80 in Interrupt Mode 1 staat, wordt bij een IRQ een RST 38h
+	;uitgevoerd. Op adres 38h, 39h en 3Ah staat een spronginstructie naar 
+	;de volgende IRQ routine
+
+intreq:	push	af
+
+stcklvl:ld	a,0		;schakel ev. naar locale IRQ stack
+	inc	a
+	ld	(stcklvl+1),a
+	dec	a
+	jr	nz,savereg
+	ld	(irqsp+1),sp
+	ld	sp,irqstck
+
+savereg:push	hl		;bewaar HL 
+jints:	jr	vdpirq
+
+chrsin:	rra			;transmit register leeg?
+	jr	nc,receiv	;nee,...
+
+trbufix:ld	hl,trmbuf	;haal momentele buffer index
+	ld	a,(wrtrbix+1)
+	cp	l		;buffer leeg?
+	jr	z,rdirid	;ja,... niets doen
+
+	ld	a,(hl)
+	out	(rs_tran),a	;verzend een byte
+
+	inc	l		;verhoog de index van die 128 byte buffer
+	res	7,l		;(die op een geheel [XX00] pagina adres begint)
+	ld	(trbufix+1),hl	;nieuwe index
+	jr	rdirid
+
+receiv:	in	a,(rs_lins)	;heeft 8250 een teken ontvangen?
+	rra
+	jr	nc,rdirid
+	in	a,(rs_recv)	;ja, lees het ontvangen karakter
+
+increc:	ld	hl,recbuf	;ontvangbufferindex
+	ld	(hl),a		;byte naar buffer
+	inc	l		;buffer vol?
+	jr	z,rdirid
+	ld	(increc+1),hl	;nee, nieuwe index
+
+rdirid:	in	a,(rs_irid)	;is er (nog) een 8250 interrupt?
+	rra
+	jr	nc,chrsin	;ja, zend of ontvang een teken
+
+vdpirq:	in	a,(vdpstat)	;heeft de VDP een interrupt gegeven?
+	or	a
+	jp	p,retint2	;nee, terug
+
+	push	de		;bewaar de rest van de gebruikte registers
+	push	bc
+	push	ix
+
+	ld	hl,autorep	;beginadres van een aantal tellers
+	xor	a		;vergelijk waarde
+
+	cp	(hl)
+	jr	z,chbell	;verlaag eventueel de autorepeat teller 
+	dec	(hl)
+	
+chbell:	inc	hl
+	cp	(hl)		;zijn we een bel aan het simuleren?
+	jr	z,chsele
+	dec	(hl)		;ja, verminder volume
+	ld	a,8
+	out	(psgsel),a	;selecteer PSG kanaal A volume register
+	ld	a,(hl)
+	rra
+	out	(psgwr),a	;en stel nieuw volume in
+	xor	a
+
+chsele:	inc	hl		;verlaag eventueel de 'SELECT geweest' teller
+	cp	(hl)
+	jr	z,chmot
+	dec	(hl)
+
+chmot:	inc	hl
+	cp	(hl)		;staat de driveselect teller op nul?
+	jr	z,chmtr		;ja, kijk naar de motor teller
+	ld	a,12		;ev. alleen motoren aan laten
+	jr	decnop
+
+chmtr:	inc	hl
+	cp	(hl)		;zijn de motoren uit?
+	jr	z,nopr
+decnop:	dec	(hl)		;nee, tijd om select of motoren uit te zetten?
+	jr	nz,nopr
+
+	push	af
+enaflsh:call	flush		;ev. veranderde sector(en) naar schijf
+	di
+	pop	bc
+	ld	a,(stopdrv)
+	or	a		;drive select teller weer aangezet?
+	jr	nz,nopr		;ja, laat drive select met rust..
+	ld	a,b
+	ld	(drvsel+1),a	;update kopie
+	out	(fddrsel),a	;update I/O poort
+
+nopr:	ld	a,low (scan-nopr-2) ;(JR SCAN indien nesten verboden is)
+
+	ld	a,18h
+	ld	(nopr),a	;nesten van printen verbieden
+
+spoolpr:ld	hl,prspbuf	;haal spoolbuffer lees index
+	ld	b,12		;maximaal 12 tekens naar de printer
+
+chspbuf:ld	de,prspbuf	;de schrijf index
+	call	cphlde		;iets in de buffer?
+
+stoppr:	jr	z,enaspr	;nee, scan het toetsenbord
+
+	ei
+lstdly:	ld	c,100		;maximaal ca. 700 (6 MHz) of 1200 (3.58 MHz)
+				;	    microseconden naar BUSY lijn kijken
+
+waibusy:dec	c		;al te lang gewacht?
+	jr	z,enaspr	;ja, scan toetsenbord
+
+	in	a,(lptbusy)	;kan de printer een teken ontvangen?
+	rra
+	jr	c,waibusy	;nee, wacht even
+
+	call	bank32		;schakel ev. andere 64K
+	ld	a,(hl)		;haal byte uit de buffer
+	out	(lptdata),a	;byte naar printer data poort
+	call	bank20		;schakel ev. terug
+
+	call	incspl		;verhoog bufferindex
+
+	xor	a		;geef een 'STROBE' puls (ca. 5.6 - 9.5 uS)
+	out	(lptstrb),a
+	ld	(spoolpr+1),hl	;bewaar nieuw index
+	dec	a
+	out	(lptstrb),a
+
+	djnz	chspbuf		;ev. volgende teken
+
+enaspr:	ld	a,3Eh
+	ld	(nopr),a	;printen mag weer
+
+scan:	ei
+	ld	de,debounc+10	;debounce buffer
+	ld	hl,keystat+10	;bewaarde toetsenbordstatus
+	di
+	ld	c,10
+
+scanlp:	ld	a,c
+	out	(wrppic),a	;selecteer een kolom van het toetsenbord
+
+	ld	a,(de)		;haal de vorige keer ingelezen rij
+	ld	b,a		;in B
+	in	a,(rdppib)	;lees een rij (8 toetsen)
+	ld	(de),a		;direct in DEBOUNCE buffer schrijven
+	cp	b		;dezelfde waarde als de vorige keer?
+	jr	nz,scannxt
+
+	xor	(hl)		;meng nieuw rij waarde met oude status
+	and	(hl)		;filter nieuw ingedrukte toetsen (worden 1)
+	ld	(hl),b		;bewaar nieuwe status
+	jr	nz,newkey	;nieuwe toets(en)? stop het scannen
+
+scannxt:dec	de		;debounce index verlagen
+	dec	hl		;status index ook
+	dec	c
+	jp	p,scanlp	;ev, volgende kolom
+	jr	retint		;interrupt routine klaar
+
+
+newkey:	ld	b,a		;nieuwe toetsen in B
+	ld	a,c		;kijk naar kolom van nieuwe toets
+	cp	8		;kolom van CAPS LOCK, SELECT en PRINT?
+	jr	nz,keyinb
+
+	ld	a,(keystat+6)
+	rra			;SHIFT ingedrukt?
+noselpr:jr	c,chcaps	;(JR als SELECT en PRINT verboden zijn)
+
+	bit	5,b		;PRINT toets?
+	jr	nz,prscr	;ja, 'screendump'
+	bit	4,b		;SELECT toets?
+	jr	nz,select	;ja, select routine
+
+chcaps:	bit	3,b		;is de CAPS LOCK ingedrukt?
+	jr	z,keyinb
+	call	psg15
+	xor	20h		;ja, inverteer de CAPS LOCK lamp
+	ld	(capstat+1),a	;nieuwe CAPS LOCK status
+	or	11011101b	;herstel bank20 select
+	out	(psgwr),a 
+
+keyinb:	call	keyibuf		;plaats rij B van kolom C in toetsenbordbuffer
+
+retint:	di
+	pop	ix
+	pop	bc		;beeindig de interrupt routine
+	pop	de
+
+retint2:ld	hl,stcklvl+1	;herstel ev. de bewaarde stackpointer
+	dec	(hl)
+	pop	hl
+	jr	nz,resta
+irqsp:	ld	sp,0
+resta:	pop	af
+	ei
+	
+	ret
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+	;na indrukken van SHIFT + PRINT..
+	;print eventueel 24 regels schermtekst naar de printer
+
+prscr:	ld	de,wait		;'Wait'
+	call	txtl25
+
+	ld	hl,crtvram	;beginadres van te printen VRAM gebied
+	ld	b,25		;totaal 24 regels + 1 extra CRLF
+	jr	pritonl		;eerst CR en LF
+
+priline:push	bc		;bewaar regelteller
+	ld	b,80		;b=teller
+
+prilinl:call	getcode
+	inc	hl
+	djnz	prilinl		;volgende
+	pop	bc		;herstel regelteller
+
+pritonl:ld	c,13
+	call	lprintc		;CR en LF naar printer
+	ld	c,10
+	call	lprintc
+	djnz	priline		;nee, volgende regel
+
+dsplfk:	call	rstl25		;(herstel) regel 25
+	ex	af,af'		;Registerpaare austauschen
+	cp	27		;ESC statt SELECT gedrueckt?
+	jp	z,wboot		;auf zum Warmboot
+	ex	af,af'		;Registerwerte korrigieren (falls SELECT)
+	jr	retint		;terug van int.
+
+getcode:call	crtb		;VRAM einschalten
+	ld	c,192
+	ld	a,(hl)		;VRAM-Code aus VRAM holen
+	cp	96		;norales ASCII-Zeichen (0-96)?
+	jr	c,addret	;ja  -> a=a+32, fertig
+	cp	c		;Grafikzeichen (192-255)?
+	jr	nc,adcret	;ja  -> a=a-32, fertig
+	ld	c,-96		;nein-> a=a-64, d.h. invers!
+
+adcret:	add	a,c
+addret:	add	a,32
+	ld	c,a
+	call	normb
+
+	;C naar printer zonder HL en BC te beinvloeden
+lprintc:push	hl
+	push	bc
+	call	listiob
+	pop	bc
+	pop	hl
+	ret
+
+	;de tekst tijdens SCREENPRINT en FLUSH na drive select uit
+wait:	db	'Wait',0
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+	;na indrukken van SHIFT + SELECT...
+select:	ld	hl,selcnt
+	ld	a,(hl)
+	ld	(hl),30		;reset SELECT teller
+	or	a		;binnen korte tijd 2 * SELECT gedrukt?
+	jr	nz,fkords	;ja, RS-232 - drives - functietoets edit
+
+	ld	hl,fkdisp
+	ld	a,(hl)		;functietoetsen gaan uit wanneer ze aan waren
+	xor	26h		;(en andersom natuurlijk)
+	ld	(hl),a
+	jr	dsplfk
+
+fkords:	call	disslpr		;verbied SELECT en PRINT
+
+wainsel:ei
+	ld	a,(keystat+8)	;wacht tot SELECT losgelaten is
+	and	10h
+	jr	z,wainsel
+
+	call	eron		;wis onderste regel
+
+	ld	a,200
+	ld	(selrow+3),a	;SELECT krijgt code 200
+	inc	a
+	ld	(lrgrow+5),a	;LEFTGR krijgt code 201
+	inc	a
+	ld	(lrgrow+4),a	;RIGHTGR krijgt code 202
+	inc	a
+	ld	(bckrow+1),a	;BACKSPACE krijgt code 203
+
+	ld	a,3Ah	
+	ld	(sformc),a	;RS-232 formaat niet gewijzigd..
+	ld	(dformc),a	;drive formaat ongewijzigd..
+	ld	(dformr),a
+
+	;stel de onderste (drive en RS-232) formaat regel samen
+
+prform:	ld	hl,(dphdra+10)	;beginadres drive A disk parameter blok
+	ld	de,drvabt+3	;beginadres drive A formaat tekst
+prdform:ld	a,e
+	ld	bc,21
+	add	hl,bc		;bereken adres van formaat naam
+	ld	c,6		;naam is 6 letters lang
+	ldir			;naam naar tekststring
+	ld	hl,(dphdrb+10)	;DPB van drive B	
+	ld	de,drvbbt+3	;B formaat tekst
+	cp	e		;B formaat reeds gedaan?
+	jr	nz,prdform	;nee, doen
+
+	ld	a,(stoppr)		;printerbuffer aan?
+	ld	hl,' ' * 256 + 'N'
+	cp	28h
+	jr	z,stpono
+	ld	hl,'F' * 256 + 'F'	;nee, dus uit
+stpono:	ld	(ponoff+4),hl
+
+	ld	a,(bdidx+1)	;BAUDRATE index
+	add	a,a		;*2
+	ld	c,a
+	ld	hl,baudtx	;tekst der BAUDRATES
+	add	hl,bc
+	ld	de,baudbt+1
+	ld	c,4
+	ldir			;BAUDRATE tekst naar string
+
+	ld	a,(sformat+1)	;seriekanaalformaat (kopie van LINE CONTROL)
+	ld	c,a
+	and	3
+	add	a,'5'		;aantal DATA bits
+	ld	(databt+1),a
+
+	ld	a,c
+	rra
+	rra
+	and	1
+	add	a,'1'		;aantal STOP bits
+	ld	(stopbt+1),a
+
+	ld	a,'N'
+	bit	3,c		;geen pariteit?
+	jr	z,stpartx
+	ld	a,'E'
+	bit	4,c		;EVEN pariteit?
+	jr	nz,stpartx
+	ld	a,'O'		;nee, ODD
+stpartx:ld	(paribt+1),a
+
+frmpos:	ld	hl,crtvram+24*80+16	;1e VRAM positie
+	ld	de,drvabt		;1e adres van tekst
+	call	pronll			;print formaten tekst
+
+waifrm:	call	waikey		;wacht op toets
+	ld	hl,sformat+1
+
+	cp	27		;ESCAPE?
+	jp	z,wbooti	;Notausgang zum Warmboot
+
+	sub	200		;SELECT?
+	jp	z,sformc	;ja, kijk of formaat gewijzigd is
+	dec	a		;LEFT GRPH?
+	call	z,english	;Englischen Zeichensatz einschalten
+	dec	a		;RIGHT GRPH?
+	call	z,deutsch	;Deutschen Zeichensatz einschalten
+
+	sub	'1'-202		;(1) drive A wijzigen?
+	jr	z,chdra
+	dec	a		;(2) drive B wijzigen? 
+	jr	z,chdrb
+	dec	a		;(3) functietoetsen editeren
+	jp	z,edfkey
+	dec	a		;(4) printer start/stop?
+	jr	z,ststpr
+	dec	a		;(5) printer spool buffer legen?
+	jr	z,empty
+	dec	a		;(6) BAUDRATE wijzigen?
+	jr	z,chbaud
+	dec	a		;(7) aantal DATA bits wijzigen?
+	jr	z,chdatb
+	dec	a		;(8) aantal STOP bits wijzigen?
+	jr	z,chstpb
+	dec	a		;(9) pariteit wijzigen?
+	jr	nz,waifrm	;nee, wacht
+	
+
+chgpar:	ld	bc,0818h	;B=increment, C=pariteit masker
+	ld	a,0E7h		;masker
+	jr	adjsfrm
+
+chdatb:	ld	bc,0103h	;B=increment, C=databit masker
+	ld	a,0FCh		;masker
+
+adjsfrm:and	(hl)		;haal de niet te wijzigen bits
+	ld	e,a
+	ld	a,(hl)		;originele byte
+	add	a,b		;tel increment erbij op
+	and	c		;alleen de te wijzigen bits nog in A
+	or	e		;meng met originele rest
+	jr	stjppr		;bewaar en print nieuwe toestand
+
+
+chstpb:	ld	a,(hl)
+	xor	4		;verander aantal stopbits
+stjppr:	ld	(hl),a
+	ld	a,0CDh		;RS-232 formaat gewijzigd
+	ld	(sformc),a
+jpprf:	jp	prform		;print gewijzigde toestand
+
+
+chbaud:	ld	hl,bdidx+1	;selecteer andere BAUDRATE
+	ld	a,(hl)
+	add	a,2
+	and	15
+	jr	stjppr
+
+
+ststpr:	ld	hl,stoppr	;start/stop de printer
+	ld	a,(hl)
+	xor	30h
+	ld	(hl),a
+	jr	jpprf
+
+
+empty:	di
+	ld	hl,(spoollo+1)	;leeg printerbuffer
+	ld	(spoolpr+1),hl
+	ld	(chspbuf+1),hl
+	jr	jpprf
+
+
+chdra:	ld	de,dphdra+10	;adres van te wijzigen DPH drive A
+	ld	hl,achgd
+	ld	a,(driveao)
+	jr	chdr
+
+chdrb:	ld	de,dphdrb+10 	;adres DPH drive B
+	ld	hl,bchgd
+	ld	a,(drivebo)
+
+chdr:	push	af
+	push	hl
+	call	waiselo		;wacht tot drive select uit is (FLUSH..)
+	pop	hl
+	pop	af
+	ld	(hl),255	;zet de 'drive veranderd' vlag
+
+infrm:	push	af
+
+	ex	de,hl
+	ld	e,(hl)		;adres van DPB in HL
+	inc	hl
+	ld	d,(hl)
+	ex	de,hl
+	ld	bc,dpbdrb-dpbdra	;lengte van DPB
+	ld	a,l			;lage byte momentele DPB
+	add	hl,bc			;HL op volgende DPB
+	cp	low dpbdrh		;stond HL op laatste?
+	jr	nz,stnwdp
+	ld	hl,dpbdra	;ja, weer aan het begin
+stnwdp:	ex	de,hl
+	ld	(hl),d		;zet nieuw DPB adres
+	dec	hl
+	ld	(hl),e
+	ex	de,hl
+	pop	af		;A=toegestane formaten byte
+	push	de
+	ld	de,dpbdra
+	or	a
+	sbc	hl,de		;HL=DPB adres relatief t.o.v. DPBDRA
+	ld	e,a		;formaten in E
+	rlca
+
+subfrm:	rrca			;schuif het 'Ok' bit van betreffend formaat
+	or	a		;   				(naar bit 0)
+	sbc	hl,bc
+	jr	nc,subfrm
+
+	rra			;gekozen formaat voor deze drive toegestaan?
+	ld	a,e		;herstel formaten byte
+	pop	de		;herstel DPB adres
+	jr	nc,infrm	;formaat niet toegestaan... 1 verder
+
+	ld	a,0CDh		;DISK formaat gewijzigd
+	ld	(dformc),a
+	ld	(dformr),a
+	jr	jpprf		;en print nieuwe formaat
+
+
+wbooti:	ex	af,af'		;Vorbereitung fuer den Warmboot
+sformc:	call	initrs		;ev. gewijzigde RS-232 status instellen
+	
+dformc:	call	clixev		;bereken buffers na diskformaatwijziging
+dformr:	call	relogi		;(her) LOGIN huidige drive
+
+	ld	a,8
+	ld	(bckrow+1),a	;BACKSPACE krijgt weer code 8
+	ld	a,255
+	ld	(selrow+3),a	;wis SELECT code 
+	ld	hl,0106h
+	ld	(lrgrow+4),hl	;RIGHT GRPH und LEFT GRPH bekommen die Codes
+	jp	dsplfk		;01 und 06 (^A und ^F fuer WordStar)
+
+
+edfkey:	ld	de,1		;1e functietoetsnummer, 'cursor' links
+
+	;geef functietoetsnummer en inhoud op onderste regel weer
+prcurfk:push	hl		;bewaar cursor adres
+	call	eron		;wis onderste regel (terug.. B=0)
+
+	ld	hl,crtvram+24*80+4	;1e positie
+	push	hl			;VRAM adres op stack
+
+	ld	a,e		;functietoetsnummer
+	add	a,a		;*2
+	add	a,a		;*4
+	add	a,a		;*8
+	ld	c,a
+	ld	hl,fktbeg-8
+	add	hl,bc		;HL=beginadres van weergegeven tekst
+
+	ld	b,2
+fknumm:	ld	a,(hl)		;print het functietoetsnummer
+	res	7,a	
+	inc	hl
+	ex	(sp),hl
+	call	wrahl
+	inc	hl
+	ex	(sp),hl
+	djnz	fknumm
+
+	ld	a,d
+	or	a		;cursor voor de eerste keer in linker deel?
+	jr	nz,priltxt
+	pop	bc		;ja, VRAM adres even in BC
+	pop	af		;negeer bewaarde cursor adres
+	push	hl		;nieuw cursor adres
+	push	bc		;VRAM adres weer op z'n plaats
+
+priltxt:ld	b,6		;6 tekens van Ftoets tekst weergeven
+	ld	a,d
+	cpl
+	call	prlrtxt
+
+	pop	hl		;VRAM adres 6 verder
+	ld	c,6
+	add	hl,bc
+	push	hl
+
+	ld	a,e		;bereken adres van Ftoets inhoud
+	add	a,a		;*2
+	add	a,e		;*3
+	add	a,a		;*6
+	add	a,a		;*12
+	ld	c,a
+	ld	hl,fkey-12
+	add	hl,bc
+
+	ld	a,d
+	cp	80h		;cursor voor de eerste keer in rechter deel?
+	jr	nz,prirtxt
+	pop	bc		;ja, VRAM adres even in BC
+	pop	af		;negeer bewaarde cursor adres
+	push	hl		;nieuw cursor adres
+	push	bc		;VRAM adres weer op z'n plaats
+
+prirtxt:ld	b,12		;max 12 tekens
+	ld	a,d
+	call	prlrtxt
+	pop	hl		;VRAM adres van de stack af
+
+	push	de		;wacht op een toets
+	call	waikey
+	pop	de
+	pop	hl		;herstel cursor
+
+	ld	c,a		;toets in C
+
+	sub	200		;(200) SELECT?
+	jr	z,sformc
+	dec	a		;(201) LEFTGR
+	jr	z,doleftg
+	dec	a		;(201) RIGHTGR?
+	jr	z,doright
+	dec	a		;(203) BACKSPACE?
+	jr	nz,akey
+
+	ld	a,d
+	and	0Fh		;is er iets te backspacen?
+	jr	z,jpprcur
+	dec	hl		;ja, cursor -1
+	ld	(hl),0		;wis teken
+	dec	d		;teller-1
+	bit	7,d		;links bezig?
+	jr	nz,jpprcur
+	ld	(hl),' '	;ja, met een spatie wissen
+
+jpprcur:jp	prcurfk		;print functietoetsen
+
+doleftg:inc	e		;naar de volgende functietoets..
+	ld	a,e
+	cp	11		;hoger dan 10? naar 1
+	ld	a,d
+	jr	nz,firstfl
+	ld	e,1
+	jr	firstfl
+
+doright:ld	a,d		;verander het cursor veld
+	xor	80h
+
+firstfl:and	80h		;wis aantal ingetikte tekens
+	ld	d,a
+
+	jr	jpprcur
+
+akey:	ld	a,c		;originele toets
+	ld	b,12		;maximaal aantal tekens rechterveld
+	bit	7,d		;linkerveld?
+	jr	nz,chfich
+	ld	b,6		;ja, maximaal aantal tekens linkerveld
+	cp	32		;CTRL code gegeven?
+	jr	c,jpprcur	;ja, dat mag niet in het linkerveld
+
+chfich:	ld	a,d
+	and	0Fh		;1e keer in dit veld een teken gegeven?
+	jr	nz,addkey
+	bit	7,d		;linkerveld?
+	jr	nz,clfield	;nee, wis met nullen
+	ld	a,' '		;ja, wis met spaties
+
+clfield:push	hl
+	push	bc
+cfieldl:ld	(hl),a		;ja, wis dat veld
+	inc	hl
+	djnz	cfieldl
+	pop	bc
+	pop	hl
+
+addkey:	cp	b		;veld reeds vol?
+	jr	z,jpprcur	;ja, houden zo
+	ld	(hl),c		;teken naar veld
+	inc	hl		;verhoog veldindex ('cursor')
+	inc	d
+	jr	jpprcur
+
+;------------------------------------------------------------------------------
+	;achtergrond tekst van drives en RS-232 regel
+drvabt:	db	'1'-128, 'A:......', -96
+drvbbt:	db	'2'-128, 'B:......', -96
+	db	'3'-128, 'edfk',     -96
+ponoff:	db	'4'-128, 'prON ',    -96
+	db	'5'-128, 'clpb'
+nors:	db	0			;-96 bij wel RS-232
+baudbt:	db	'6'-128, ' 300 Bd',-96
+databt:	db	'7'-128, '8 Dta',   -96
+stopbt:	db	'8'-128, '1 Stp',   -96
+paribt:	db	'9'-128, 'N Par', 0
+
+
+	;baudrate deelfactoren (deelfactor= 3.0723E6 / (BAUD * 16)
+baudrt:	dw	3840		;  50
+	dw	2560		;  75
+	dw	1746		; 110
+	dw	1280		; 150
+	dw	 640		; 300
+	dw	 320		; 600
+	dw	 160		;1200
+	dw	  80		;2400
+
+	;baudrate teksten
+baudtx:	db	'  50  75 110 150 300 60012002400'
+
+
+	;RS-232 BAUDRATE, DATABITS, STOPBITS en PARITYBITS instellen
+initrs:	di
+	ld	a,80h
+	out	(rs_linc),a	;selecteer BAUDRATE registers
+bdidx:	ld	de,8		;default BAUDRATE index
+	ld	hl,baudrt	;beginadres deelfactoren tabel
+	add	hl,de
+	ld	a,(hl)		;lage byte
+	out	(rs_divl),a
+	inc	hl
+	ld	a,(hl)		;hoge byte
+	out	(rs_divh),a
+sformat:ld	a,3		;kopie RS-232 line control register
+	out	(rs_linc),a	;LINE CONTROL goed instellen
+
+	ld	a,3		;DSR en RTS signaal activeren
+	out	(rs_modc),a	;naar MODEM control register
+	ret
+
+;------------------------------------------------------------------------------
+subttl CONSOLE, LIST en PUNCH output
+page
+	;conout kan niet in F000-F7FF staan vanwege het bankswitchen van het
+	;80 koloms VRAM
+
+	;output het ASCII teken in register C, afhankelijk van het IObyte
+	;bit 	1,0:
+	;	0 0 ==> RS-232
+	;	0 1 ==> 80 koloms
+	;	1 0 ==> huidige list device
+	;	1 1 ==> 80 koloms
+
+conout:	call	locstck		;locale stack 
+	rra	   		;80 koloms geselecteerd?
+	jr	c,crtout	;ja, doen
+	rra	   		;TTY of LST?
+	jr	c,listiob	;byte naar huidige LST device
+	jr	waipun
+
+	;punch output.. alles naar RS-232's circulaire outputbuffer
+punch:	call	locstck		;locale stack
+
+waipun:	call	chctlc		;onderbreking?
+	ret	z		;ja, stop
+	di
+wrtrbix:ld	hl,trmbuf	;schrijfbufferindex
+	ld	e,l
+	inc	l
+	res	7,l		;bereken volgende waarde
+	ld	a,(trbufix+1)	;leesbufferindex
+	cp	l		;buffer vol?
+	jr	z,waipun	;ja, wacht..
+
+	cp	e		;buffer leeg?
+	jr	nz,tobuf	;nee, zet teken in buffer
+
+	in	a,(rs_lins)	;is transmit buffer leeg?
+	and	20h
+	jr	z,tobuf		;nee, toch in buffer zetten
+
+	ld	a,c
+	out	(rs_tran),a	;verzend het byte
+	ret
+
+tobuf:	ld	(wrtrbix+1),hl	;nieuwe schrijfbufferindex
+	ld	l,e		;oude index
+	ld	(hl),c		;schrijf teken in de buffer
+	ret
+
+
+	;kijk of er ruimte in de printer SPOOL buffer is
+listst:	call	locstck		;locale stack
+
+listat:	di
+	ld	hl,(chspbuf+1)	;schrijfindex
+	push	hl		;op stack
+	call	incspl		;bereken volgende adres
+	ld	de,(spoolpr+1)	;haal leesindex
+	call	cphlde		;buffer vol?
+	pop	de		;oude index in DE
+	ld	a,0FFh		;als buffer niet vol is
+	ret	nz
+	xor	a		;A=0, buffer vol
+	ret	
+
+
+	;output het ASCII teken in register C, afhankelijk van het IObyte, 
+	;naar het momentele LST: device
+	;bit 	7,6:
+	;	0 0 ==> RS-232
+	;	0 1 ==> 80 koloms
+	;	1 0 ==> centronics printer (spoolbuffer)
+	;	1 1 ==> 80 koloms
+
+
+list:	call	locstck		;locale stack
+
+listiob:ld	a,(iobyte)
+	add	a,a
+	jp	m,crtout	;output naar CRT:
+	jr	nc,waipun	;output naar RS-232
+
+	;output naar circulaire printer buffer
+wrspool:call	chctlc		;onderbreking?
+	ret	z		;ja, terug
+	call	listat		;kijk of buffer vol is
+	jr	z,wrspool	;ja, wacht
+
+	ld	(chspbuf+1),hl	;nieuwe schrijfbufferindex
+	call	bank32		;ev. extra 64K RAM inschakelen
+	ld	a,c
+	ld	(de),a		;schrijf byte in de buffer
+	call	bank20		;ev. normale 64K weer inschakelen
+	ret
+
+
+crtout:	ld	b,32
+	ld	hl,esccnt
+	ld	a,(hl)		;met ESCAPE opdracht bezig?
+	or	a
+	jr	nz,escseq	;ja, kijk naar binnengekomen byte
+
+	ld	a,c
+	cp	b		;controle code?
+	jr	c,contseq	;ja, bekijk de opdracht
+
+addrvs:	ld	c,0		;tel reverse video offset erbij op
+	cp	160
+	jr	c,curadr
+	ld	c,64		;offset fuer Grafikzeichen
+curadr:	ld	hl,crtvram	;huidige cursor adres in HL
+	call	wrachl		;schrijf karakter A(+C) in VRAM
+curhor:	ld	de,0		;momentele cursor coordinaat in DE
+	ld	a,e
+	cp	79		;teken aan einde van regel geprint?
+	jp	nz,curight	;nee, cursor 1 naar rechts
+	jp	crlf		;ja, carriage return (vanwege ev. scrollen)
+
+contseq:ld	hl,cntrseq+11	;wijs op einde van controle code tabel
+	ld	bc,12		;totaal 11 bytes te vergelijken
+	ld	de,cntrsta	;beginadres controle codes startadressentabel
+	jr	chintbl		;kijk of code in de tabel zit
+
+escseq:	cp	3		;met locate cursor bezig?
+	jr	nc,chescxy
+	ld	a,c
+	sub	b		;trek offset van coordinaat af
+	jr	nc,chhove
+	xor	a		;coordinaat=0 als te lage waarde gegeven is 
+chhove:	dec	(hl)		;zijn we met het 2e coordinaat bezig?
+	jr	z,chhoco	;ja, bewaar horizontale coordinaat
+	cp	24		;te hoog voor verticaal?
+	jr	c,stveco
+	ld	a,23		;ja, neem maximale waarde
+stveco:	ld	(curhor+2),a	;schrijf nieuwe waarde
+	ret
+
+chhoco:	cp	80		;te hoog voor horizontale coordinaat
+	jr	c,sthoco
+	ld	a,79		;ja, neem maximale waarde
+sthoco:	ld	de,(curhor+1)	;nieuw cursor coordinaat in DE
+	ld	e,a
+	jp	calcura		;en bereken nieuwe cursor adres
+
+chescxy:ld	(hl),0		;wis escape teller
+	jp	p,escxy		;3e byte van ESC x of y?
+
+	ld	a,c		;esc code in A
+	ld	hl,esccseq+20	;wijs op einde van de tabel
+	ld	bc,21		;18 codes
+	ld	de,esccsta	;begin ESCAPE startadressen
+
+chintbl:cpdr			;kennen we deze code
+	ret	nz		;nee, klaar met CRTOUT
+
+	ex	de,hl
+	add	hl,bc		;bereken index in startadressentabel
+	add	hl,bc
+	ld	e,(hl)		;haal startadres
+	inc	hl
+	ld	d,(hl)
+	ld	hl,(curhor+1)
+	ex	de,hl		;startadres in HL, cursor coordinaat in DE
+	jp	(hl)		;voer gewenste commando uit
+
+
+	;enkele ASCII codes voor DEC VT-52 terminal emulatie
+cntrseq:db	7,8,9,10,11,12,13,27,28,29,30,31
+
+	;de startadressen van bovengenoemde besturingscodes
+cntrsta:dw	bell		; 7, bell
+	dw	culeft		; 8, backspace
+	dw	tab		; 9, tab
+	dw	linefd		;10, line feed
+	dw	cuhome		;11, cursor home
+	dw	clrscr		;12, form feed
+	dw	carret		;13, carriage return
+	dw	escape		;27, escape
+	dw	curight		;28, cursor right
+	dw	culeft		;29, cursor left
+	dw	cuup		;30, cursor up
+	dw	cudown 		;31, cursor down
+
+	;VT-52 ESCAPE besturingscodes
+esccseq:db	'ABCDEHIJKLMSYdejlpqxy'
+
+	;de startadressen van bovengenoemde besturingscodes
+esccsta:dw	cuup		;esc A, cursor up
+	dw	cudown		;esc B, cursor down
+	dw	curight		;esc C, cursor right
+	dw	culeft		;esc D, cursor left
+	dw	clrscr		;esc E, clear screen
+	dw	cuhome		;esc H, cursor home
+	dw	ibmcode		;esc I, IBM Zeichensatz
+	dw	erateop		;esc J, erase to end of page
+	dw	erateol		;esc K, erase to end of line
+	dw	insline		;esc L, insert line
+	dw	delline		;esc M, delete line
+	dw	svicode		;esc S, SVI Zeichensatz
+	dw	loccu		;esc Y, locate cursor
+	dw	deutsch		;esc d, Deutscher  Zeichensatz
+	dw	english		;esc e, Englischer Zeichensatz
+	dw	clrscr		;esc j, clear screen
+	dw	eraline		;esc l, erase current line
+	dw	inverse		;esc p, inverse video on
+	dw	normal		;esc q, inverse video off
+	dw	escx		;esc x, set block cursor of cursor uit
+	dw	escy 		;esc y, set line cursor	 of cursor aan
+
+
+	;diverse besturings routines
+
+	;luid de 'bel'
+bell:	di
+	ld	a,1
+	out	(psgsel),a	;PSG register 1 wordt 0
+	xor	a
+	out	(psgwr),a
+
+	out	(psgsel),a	;PSG register 0 wordt 55h
+	ld	a,55h
+	out	(psgwr),a
+
+	ld	a,22		;zet het volume voor de IRQ routine
+	ld	(bellamp),a
+	ret			;klaar met crtout
+
+
+	;wis het scherm, cursor linksboven
+clrscr:	ld	d,255		;begin bij regel 0 (-1)
+	ld	hl,crtvram	;begin linkboven
+	call	eratepl		;wis 24 regels
+
+
+	;cursor naar linksboven
+cuhome:	ld	d,0
+
+
+	;cursor geheel links
+carret:	ld	e,0
+	jr	jpcalcu
+
+
+	;cursor 1 plaats naar rechts
+curight:inc	e
+	ld	a,e
+	cp	80		;staat de cursor geheel rechts?
+	jr	nz,jpcalcu	;nee,  Ok
+
+
+	;cursor 1 plaats naar links
+culeft:	dec	e		;1 naar links dus
+	db	3Eh		;dummy LD A,data (negeer volgende DEC D)
+
+
+	;cursor 1 plaats omhoog
+cuup:	dec	d		;1 omhoog dus
+
+	ret	m		;was E of D nul? ja, klaar met crtout
+	jr	jpcalcu
+
+
+	;cursor 1 plaats omlaag
+cudown:	ld	a,d
+	cp	23		;reeds op onderste regel?
+	ret	z		;ja, klaar met crtout
+	inc	d		;1 omlaag
+jpcalcu:jp	calcura
+
+
+	;cursors horizontale coordinaat moet door 8 deelbaar zijn...
+tab:	ld	a,e
+	and	0F8h		;wis bits 2..0
+	add	a,8		;8 verder
+	ld	e,a
+	cp	80		;te ver?
+	jr	c,jpcalcu	;nee, ok
+
+
+	;cursor naar links, op volgende regel. Scroll ev. het scherm
+crlf:	ld	e,0		;cursor links
+
+	;cursor 1 regel lager, scroll scherm op regel 24
+linefd:	inc	d		;1 regel lager
+	ld	a,d
+	cp	24		;te laag?
+	jr	nz,jpcalcu	;nee, ok
+	dec	d		;cursor op regel 24
+	ld	hl,crtvram	;1e doeladres voor het scrollen = begin VRAM
+	jr	scrollu
+
+
+	;Umschaltung Deutsch/Englischer Zeichensatz
+english:scf			;Carrier setzen
+deutsch:ld	a,3fh		;Bit 6 fuer Umschaltung Deutsch/Englisch
+	inc	a		;Zero-Flag loeschen, a=01000000b (fuer pio_wr)
+
+	;Umschaltung SVI/IBM Zeichensatz
+svicode:ccf			;Dem C-Flag macht IN r,(C) nichts aus
+ibmcode:ld	bc,25*256+pio_wr;b: 25 Zeilen, c: Adresse vom PIO Datenport
+	pioport	equ	$-1
+	jr	nz,outpio	;--> Einsprung war bei 'english'/'deutsch'
+	ld	a,81h		;Opcode ADD A,C (kommt nach 'wrachl & adcret')
+	jr	c,outdo		;--> Einsprung war bei 'svicode'
+	in	a,(c)		;--> Jetzt bleibt noch 'ibmcode'
+	ret	m		;Schon aktiviert? Ja: Zuschlag gibt's nicht
+	ld	hl,crtvram	;Anfang 'ibmcode': Startadresse des VRAM
+	call	crtb		;                  VRAM einschalten
+
+cnvcol:	push	bc
+	ld	bc,80*256+96	;b: 80 Zeichen, c: Operand fuer Codeumwandlung
+cnvrow:	ld	a,(hl)		;VRAM-Code aus VRAM holen
+	sub	c		;normales Zeichen?
+	jr	c,codsvi	;ja  -> fertig
+	cp	c		;inverses Zeichen?
+	jr	c,codibm	;ja  -> fertig!
+	add	a,c		;nein-> also Grafik (bleibt, wie sie ist)
+codibm:	ld	(hl),a		;wenn IBM <> SVI
+codsvi:	inc	hl		;wenn IBM =  SVI (Zeichen ueberspringen)
+	djnz	cnvrow
+	pop	bc
+	djnz	cnvcol
+	call	normb		;VRAM ausschalten, gleichzeitig XOR A
+
+outdo:	ld	(wrachl),a	;entweder ADD A,C, wenn invers erlaubt, oder
+	ld	(adcret),a	;         NOP    , wenn IBM-Modus
+	ld	a,10000000b	;Bit 7 fuer Zeichensatzumschaltung
+
+outpio:	in	b,(c)
+	jr	nc,setbit	;Kein Carrier: Bit soll gesetzt  werden
+	cpl			;     Carrier: Bit soll gel|scht werden
+	and	b
+	db	0feh		;dummy: CP x    (=1 Byte ueberspringen)
+setbit:	or	b		;gewuenschtes Bit setzen
+	out	(c),a		;Zeichensatz ueber PIO aktivieren
+	ret
+
+
+	;zet inverse mode
+inverse:ld	a,96		;inverse video offset=96
+	db	06h		;dummy LD B,xx
+
+	;inverse video uit
+normal:	xor	a		;normal  video offset=0
+	ld	(addrvs+1),a	;ob invers erlaubt, wird in 'wrachl' getestet
+	ret			;klaar met crtout
+
+
+	;zet escape vlag op 4... ESC y bezig
+escy:	ld	a,4
+	db	21h
+
+	;escape vlag op 3... ESC x bezig
+escx:	ld	a,3
+	db	21h
+
+	;zet de escape vlag op 2 voor locate cursor commando
+loccu:	ld	a,2
+	db	21h		;dummy LD HL,
+
+	;zet escape vlag voor volgende CRTOUT aanroep
+escape:	ld	a,255
+	ld	(esccnt),a
+	ret			;klaar met crtout
+
+
+	;verwijder de regel waarin de cursor staat..
+delline:ld	hl,(insllp+1)	;1e doeladres voor het scrollen = begin regel
+
+	;scroll een aantal regels omhoog. Hier wordt niet 1 maar meerdere keren
+	;de LDIR gegeven, zodat de interrupt niet al te lang verboden is.
+
+scrollu:push	de		;bewaar cursor
+scrulp:	ld	e,l
+	ld	d,h		;doeladres in DE
+	ld	bc,80		;80 bytes per regel
+	add	hl,bc		;bereken bronadres
+	ld	a,d
+	cp	high (crtvram + 23*80)	;doeladres reeds onderaan?
+	jr	nc,scrudon		;ja, klaar
+	call	movelin			;scroll een regel
+	ex	de,hl			;nieuwe doeladres in HL
+	jr	scrulp			;scroll volgende regel
+
+scrudon:pop	de			;herstel cursor
+	ld	hl,crtvram + 23*80
+	call	era80			;wis de onderste regel
+	jp	jpcalcu			;bereken nieuwe cursor
+
+
+	;insert een lege regel, laat de interrupt niet te lang uit
+	;de cursorpositie verandert niet
+insline:ld	hl,crtvram+22*80;1e naar beneden te scrollen regel
+
+insllp:	ld	de,crtvram	;het begin van de huidige regel
+	call	cphlde		;is HL lager dan begin huidige regel?
+	jr	c,eraline	;ja, klaar.. wis de regel
+	push	hl		;bewaar begin
+	ld	e,l
+	ld	d,h
+	ld	bc,80
+	add	hl,bc		;bereken begin volgende regel
+	ex	de,hl		;bron in HL en doel in DE
+	call	movelin		;scroll regel
+	pop	hl
+	ld	bc,-80
+	add	hl,bc		;hl wijst op begin voorgaande regel
+	jr	insllp		;scroll ev. volgende regel
+
+
+	;wis de rest van het beeldscherm (inclusief cursor positie)
+erateop:call	erateol		;eerst de rest van de regel
+eratepl:inc	d
+	ld	a,d		;alle regels gedaan?
+	cp	24
+	ret	z		;ja, klaar met wissen
+	call	era80		;wis een regel
+	jr	eratepl
+
+
+	;wis de rest van de huidige regel (inclusief cursor positie)
+erateol:ld	a,80		;eerst berekenen hoeveel tekens er nog zijn
+	sub	e
+	ld	b,a		;resterende aantal in B
+	ld	hl,(curadr+1)	;huidige cursor adres
+	jr	erab		;en wis de rest
+
+
+	;wis de huidige cursor regel
+eraline:ld	hl,(insllp+1)	;beginadres in HL
+
+era80:	ld	b,80		;80 tekens wissen
+
+erab:	call	crtb		;schakel 80 koloms VRAM in
+	xor	a
+erallp:	ld	(hl),a		;wis de regel
+	inc	hl
+	djnz	erallp
+	jr	normb		;80 koloms VRAM uit
+
+
+	;na ontvangen 3e byte ESC x of y...
+escxy:	rra			;Carry 1... ESC x (block cursor.. cursor uit)
+	ld	a,c
+	jr	nc,escy45
+
+	ld	bc,1F20h	;'cursor uit' maskers
+	sub	'5'		;ESC x 5 ?
+	jr	z,outcur	;ja, cursor uit
+
+	inc	a		;ESC x 4 ?
+	ret	nz		;nee, klaar met crtout
+	ld	bc,6000h	;'block cursor' maskers
+	jr	outcur
+
+escy45:	ld	bc,6007h	;'line cursor' maskers
+	sub	'4'		;ESC y 4 ?
+	jr	z,outcur	;ja, line cursor
+
+	dec	a		;ESC y 5 ?
+	ret	nz		;nee, klaar met crtout
+	ld	bc,1F60h	;'cursor aan' maskers
+
+outcur:	di
+	ld	a,10
+	out	(crtadr),a	;beginpunt naar CRT register 10
+
+curstrt:ld	a,60h		;cursorstartregister
+	and	b		;voer bewerking uit
+	or	c
+	ld	(curstrt+1),a	;terug in operand
+	bit	6,a		;is de cursor aan?
+	jr	z,setcurr	;nee, schrijf data naar CRT register
+	bit	0,a		;is het een 'line cursor'
+	jr	z,setcurr
+	res	5,a		;ja, 2 keer zo snel knipperen
+setcurr:out	(crtdata),a
+	ret
+
+
+	;Einde van de crtout routine, wanneer de cursor van plaats veranderd
+	;is; bereken het VRAM adres van de cursor.
+	;Het cursor coordinaat staat in DE
+
+calcura:ld	(curhor+1),de	;bewaar nieuw cursor coordinaat
+	ld	a,d		;verticale coordinaat in A
+	add	a,a		;*2
+	add	a,a		;*4
+	add	a,d		;*5
+	add	a,a		;*10	(accu is max. 230 hier)
+
+	ld	l,a
+	ld	h,high (crtvram shr 3)	;F0, maar dan 3 bits naar rechts
+
+	add	hl,hl		;*20
+	add	hl,hl		;*40
+	add	hl,hl		;verticaal * 80 + beginadres VRAM
+
+	ld	(insllp+1),hl	;bewaar VRAM beginadres van de cursor regel
+	ld	d,0
+	add	hl,de		;+horizontaal = VRAM adres van cursor
+	ld	(curadr+1),hl
+	di
+	ld	a,14		;schrijf nieuwe cursor adres naar 6845 CRT
+	out	(crtadr),a
+	ld	a,h
+	and	7
+	out	(crtdata),a
+	ld	a,15
+	out	(crtadr),a
+	ld	a,l
+	out	(crtdata),a
+nocuoff:ld	a,10		;cursor uitzetten
+	out	(crtadr),a
+	ld	a,20h
+	out	(crtdata),a
+	ret			;klaar met crtout
+
+
+	;verplaats BC bytes van HL naar DE in VRAM
+movelin:call	crtb		;80 koloms VRAM aan
+	ldir			;verplaats regel
+	jr	normb
+
+
+	;schrijf register A (+ offset C) in 80 koloms VRAM positie (HL)
+
+wrachl:	add	a,c		;Eventuell Offset fuer Invers
+wrahl:	add	a,-32		;ASCII-Code nach VRAM-Code umwandeln
+	ld	c,a	
+wrchl:	call	crtb
+	ld	(hl),c		;schrijf byte op gewenste positie
+
+	;80 koloms VRAM uitschakelen
+normb:	xor	a
+	out	(crtbank),a
+	ei
+	ret
+
+	;schakel 80 koloms VRAM in op 0F000h-0F7FFh
+crtb:	di
+	ld	a,255
+	out	(crtbank),a
+	ret
+
+;------------------------------------------------------------------------------
+subttl CONSOLE / READER input
+page
+	;geef console status in accu ==> FFh: karakter aanwezig / 0 = niet
+
+	;device afhankelijk van het IObyte
+	;bit 	1,0:
+	;	0 0 ==> RS-232
+	;	0 1 ==> toetsenbord
+	;	1 0 ==> RS-232
+	;	1 1 ==> toetsenbord
+
+const:	call	locstck		;locale stack
+	rra			;CRT of UC1?
+	jr	nc,rs232st	;nee, TTY of BAT, dus RS232 status
+
+keyst:	ld	bc,0FF00h	;zet ev. de cursor aan
+	call	outcur
+	ei
+	ld	a,(autorep)
+	or	a		;autorepeat teller nul?
+	jr	nz,chkeib	;nee,..
+
+	di
+	ld	c,10
+	ld	hl,keystat+10	;index in toetsenstatus array
+repeat:	ld	a,(hl)		;haal toestand van een toets
+	cpl			;alle ingedrukte toetsen zijn 'nieuw'
+	ld	b,a
+	or	a		;toets ingedrukt hier?
+	push	bc
+	push	hl
+	call	nz,keyibuf	;ev. een of meer toetsen naar buffer
+	pop	hl
+	pop	bc
+	dec	hl
+	dec	c
+	jp	p,repeat
+
+	ld	a,autorrp	;kort repeat tijd
+	ld	(autorep),a
+
+chkeib:	ld	a,(keybidx+1)	;haal lage byte van toetsenbordbufferindex
+	sub	low keybuf	;wijst dat op 1e byte van toetsenbordbuffer?
+rz:	ret	z		;ja, de buffer is leeg (accu=0)
+	ld	a,0FFh		;nee, er is minstens een toets
+	ret
+
+
+	;kijk of er een teken in de RS-232 invoerbuffer zit
+rs232st:ld	hl,increc+1	;haal buffer lengte
+	ld	a,(hl)
+	or	a		;iets in de RS-232 buffer?
+	jr	rz
+
+;------------------------------------------------------------------------------
+
+	;reader input, alle input van RS-232 
+reader:	call	locstck		;locale stack
+wairdr:	call	chctlc		;onderbreking?
+	ret	z		;ja, terug
+	call	rs232st		;teken in buffer?
+	jr	z,wairdr	;nee, wacht
+	di
+	ld	b,0
+	ld	c,(hl)		;bufferlengte in BC
+	dec	(hl)		;verlaag bufferlengte
+	ld	de,recbuf	;begin van buffer
+	ld	hl,recbuf+1	;1 verder 
+	ld	a,(de)		;het gewenste teken
+	ldir			;alle tekens een terug
+	ret
+
+
+	;console input, wacht op een karakter 
+
+	;device afhankelijk van het IObyte
+	;bit 	1,0:
+	;	0 0 ==> RS-232
+	;	0 1 ==> toetsenbord
+	;	1 0 ==> RS-232
+	;	1 1 ==> toetsenbord
+
+conin:	call	locstck		;locale stack
+	rra			;CRT of UC1?
+	jr	nc,wairdr	;nee, TTY of BAT, dus RS232 input
+
+
+	;haal toets uit toetsenbord buffer, of wacht op een toets
+waikey:	call	keyst		;toets in buffer?
+	jr	z,waikey	;nee, wacht
+
+	;haal toets uit buffer in de accu
+	di
+	ld	hl,keybuf+1	;wijs op volgende karakter
+	ld	de,keybuf	;wijs op gewenste karakter
+	ld	a,(de)		;haal dat
+	ld	bc,keyblen-1	;de lengte van de buffer
+	ldir			;schuif de gehele buffer 1 teken door
+keybidx:ld	hl,keybuf	;verlaag de schrijf index
+	dec	hl
+	ld	(keybidx+1),hl
+	ret
+
+;------------------------------------------------------------------------------
+subttl Disk routines
+page
+	;selecteer drive (C register), geef Disk Parameter Header adres in HL
+
+seldsk:	ld	hl,0		;ga van een illegale drive uit
+	ld	a,c
+	cp	2		;is dat zo?
+	ret	nc		;ja, terug met HL=0
+	rrca			;drivenummer in bit 7 (en Carry)
+	ld	(drive+1),a	;bewaar drive nummer
+
+	ld	de,dphdra	;ga van drive A uit
+	ld	hl,(dphdra+10)	;adres disk parameter blok
+	jr	nc,stdpha	;is dat zo?	
+
+	ld	e,low dphdrb	;nee, dan is het B
+	ld	hl,(dphdrb+10)
+
+stdpha:	push	de		;DPH even bewaren
+	push	af		;drive A of B
+
+	ld	a,(hl)
+	ld	(curams+1),a	;aantal CP/M records/track
+	ld	c,a		;in C
+	inc	hl
+	ld	b,(hl)		;BC=aantal records per track
+	inc	hl
+	inc	hl
+	ld	a,(hl)
+	inc	a
+	ld	(curbll+1),a	;aantal CP/M records/block
+
+	ld	de,4
+	add	hl,de
+	ld	e,(hl)
+	inc	hl
+	ld	d,(hl)
+	inc	de		;DE=aantal directory entries
+	srl	d
+	rr	e
+	srl	d
+	rr	e		;DE=aantal directory records
+
+	inc	hl
+	inc	hl
+	inc	hl
+	inc	hl
+	inc	hl
+	ld	a,(hl)		;aantal gereserveerde tracks
+	ld	(restrk1+1),a
+	ld	(restrk2+1),a
+
+	ex	de,hl		;HL=aantal directory records
+	or	a
+divdis:	sbc	hl,bc
+	inc	a
+	jr	nc,divdis
+
+	dec	a		;A=A + INT(HL/BC)
+	ld	(hiditr+1),a	;hoogste directory track
+	add	hl,bc		;L=rest van de deling
+	ld	a,l
+	ld	(hidire+1),a	;hoogste record op dat track
+
+	ex	de,hl
+
+	inc	hl
+	inc	hl
+
+	ld	a,(hl)
+	inc	a
+	ld	(curshf+1),a	;sector shift
+	inc	hl
+
+	ld	a,(hl)
+	ld	(curand+1),a	;sector and masker
+	ld	(andcur+1),a
+	inc	hl
+
+	pop	af		;drive A?
+	ld	de,formata
+	jr	nc,amtrb
+
+	ld	de,formatb
+
+amtrb:	ldi			;nieuwe drive formaat specificatie byte
+
+	inc	de
+	ldi			;aantal sectoren op onderzijde
+
+	inc	de	
+	ldi			;adres eventuele sector vertaaltabel
+	ld	a,(hl)
+	ld	(de),a
+
+	pop	hl		;DPH in HL
+	ret
+
+
+	;selecteer track 00
+
+home:	ld	c,0		;track 0
+
+
+	;selecteer track C
+
+settrk:	ld	a,c
+	ld	(curtrk+1),a	;gewenste track bewaren
+	ret
+
+
+	;selecteer sector C
+
+setsec:	ld	a,c		;CP/M recordnummer bewaren
+	ld	(curbll+2),a
+
+curshf:	ld	b,0		;bereken disk sectornummer
+	db	11h		;dummy LD DE,
+
+shftsec:srl	a		;sectornummer:=recordnr SHR shiftmasker
+	djnz	shftsec
+
+drive:	or	0		;meng met momentele drive
+	ld	(curtrk+2),a	;gewenste drive/sector bewaren
+	ret
+
+
+	;BC bevat nieuwe DMA adres
+
+setdma:	ld	(curdma+1),bc	;adres bewaren
+	ret
+
+
+	;converteer ev. logisch sector BC naar fysische sector HL
+	;wordt niet door deze BIOS ondersteund, wel een eventuele sector
+	;vertaling bij het inlezen/wegschrijven van disk sectoren
+
+sectran:ld	l,c		;HL=BC
+	ld	h,b
+	ret
+
+
+	;lees 128 bytes van geselecteerde sector naar DMA adres
+
+read:	xor	a
+	ld	(adjuna+1),a	;wis de 'UNALLOCATED WRITE' teller
+
+	ld	c,255		;geen schrijfactie
+	ld	a,18h
+	db	11h		;dummy LD DE, data
+
+	;schrijf 128 bytes van DMA adres naar geselecteerde sector
+
+write:	ld	a,03Eh
+
+	ld	(rwflag),a	;3Eh voor schrijven en 18h voor lezen
+
+	ld	a,11h		;FLUSH tijdens interrupt routine verbieden
+	ld	(enaflsh),a
+
+	call	locstck		;locale stack
+
+	ld	a,0CDh		;opcode van CALL
+	ld	(preread),a	;in principe een READ doen bij nieuwe sector
+
+	ld	a,(curtrk+1)
+restrk1:cp	0		;gereserveerd track?
+	jr	c,nodirc	;ja, geen directory check
+
+hiditr:	cp	0		;record van directory track?
+	jr	c,drvsel	;ja, straks directory check doen
+	jr	nz,nodirc
+
+	ld	a,(curbll+2)	;momentele record hoger dan max. directory rec.
+hidire:	cp	0
+	jr	nc,nodirc	;ja, geen dir. sector
+
+drvsel:	ld	a,0Dh		;kopie van drive select output
+	and	3		;zijn de drives uit?
+
+dodirc:	jr	nz,setdirc	;nee, ok (deze instructie wordt LD A,... na
+				;  WARME START: directory wordt altijd gelezen)
+
+	ld	a,20h		;volgende keer JR NZ op DODIRC 
+	ld	(dodirc),a
+
+	ld	a,0CDh		;directory sector altijd lezen
+	ld	(noprer+1),a
+stchinb:ld	a,(chinbuf+1)	;(wordt LD (CHINBUF + 1),A bij 64K RAM)
+
+setdirc:db	03Eh		;straks wel directory check
+
+nodirc:	ld	a,18h		;straks geen directory check doen
+	db	0
+	ld	(chdirs),a
+
+dirc64:	ld	a,(isdirsc)	;wordt LD (ISDIRSC),A bij 64K
+
+	ld	a,c
+	inc	a		;leesopdracht?
+	jr	z,chinbuf	;ja, kijk of sector in buffer zit
+
+	cp	3		;schrijfactie naar 1e record van unallocated?
+	jr	nz,adjuna
+
+curbll:	ld	hl,0		;kopieer aantal records per blok en CP/M record
+	ld	(adjuna+1),hl
+	ld	hl,(curtrk+1)	;kopieer track en drive/sector
+	ld	(unatrk+1),hl
+
+adjuna:	ld	hl,0		;L=unallocated teller, H=verwachte record
+	dec	l		;zijn er unallocated records te schrijven?
+	jp	m,chinbuf	;nee, skip
+unatrk:	ld	de,0		;E=verwachte track, D=verwachte drive
+
+	ld	a,(curbll+2)	;wordt het verwachte record geschreven?
+	cp	h
+	jr	nz,cluna	;nee, wis teller
+	ld	a,(curtrk+1)
+	cp	e		;wordt op de verwachte track geschreven?
+	jr	nz,cluna	;nee, wis teller
+	ld	a,(curtrk+2)	;op de verwachte drive?
+	xor	d
+	jp	m,cluna		;nee, wis teller
+
+	ld	a,l		;zijn de blokken en de sectoren in fase?
+	cpl			;(of te wel zit het begin of eind van het
+	xor	h		; blok per ongeluk halverwege een disk-sector,
+				; wat bij de C.U.C. en MAX enkelzijdige forma-
+				; ten kan gebeuren)
+andcur:	and	0
+	jr	nz,incurc	;nee, verhoog verwachte sector en lees sector
+
+unanpr:	ld	a,11h		;opcode van LD DE, data
+	ld	(preread),a	;er hoeft GEEN preREAD gedaan te worden
+
+incurc:	inc	h		;verhoog het te verwachten recordnummer
+
+curams:	ld	a,0		;aantal CP/M records/track
+	sub	h		;het laatste record van deze track?
+	jr	nz,stuna
+	ld	h,a		;ja, verwachte recordnummer = 0
+	inc	e		;en verhoog het te verwachten tracknummer
+	db	01h		;dummy LD BC,data
+
+cluna:	ld	l,0		;andere sector schrijven.. wis unalloc teller
+
+stuna:	ld	(adjuna+1),hl	;bewaar nieuwe gegevens
+	ld	(unatrk+1),de
+
+chinbuf:ld	hl,0FE00h	;is het gewenste record in de laatste buffer?
+curtrk:	ld	de,0
+	or	a
+	sbc	hl,de
+	jp	z,dmasec	;ja, verplaats gewenste record
+
+notinb:	jr	chbuchg		;kijk of buffer veranderd is (zonder 64K)
+
+	call	inbuf?		;staat sector reeds in geheugen?
+	jr	nz,chress	;nee, ...
+
+	;het indexbyte van deze sector wordt voorin SECTIDX geplaatst, zodat
+	;de index van de laatst naar de buffer gebrachte sector voorin staat. 
+	;De meest gebruikte sectoren blijven zo het langst in de buffer
+
+noprer:	ld	a,11h		;sector hoeft niet van schijf gelezen te worden
+	ld	(preread),a
+
+secfnd:	call	getidx		;haal index van gevonden sector
+	xor	a
+	cp	l		;gereserveerde sector?
+	jr	z,copyidx	;ja, laten staan
+	ld	e,l		;adres van index in DE
+	ld	d,h
+	dec	l		;op een lager wijzen
+	jr	z,incbot	;index reeds voorin? niet verplaatsen
+	ld	b,a
+	ld	c,l		;BC=het aantal bytes dat voor deze index staat
+	push	hl
+	push	de
+	push	bc
+	inc	h
+	inc	d
+	ld	a,(de)		;haal sector veranderd vlag
+	lddr
+	ld	(de),a		;schrijf veranderd vlag voorin
+	pop	bc
+	pop	de
+	pop	hl
+	ld	a,(de)		;haal sector index byte
+	lddr			;verplaats alle voorgaanden 1 verder
+	ld	(de),a		;schrijf indexbyte voorin
+	
+incbot:	ld	hl,searfp+1
+	ld	a,(hl)		;aantal buffers
+	srl	a		;laagste index max 3/4 van het aantal buffers
+	ld	b,a
+	srl	a
+	add	a,b
+	inc	hl
+	cp	(hl)		;laagste index maximaal?
+	jr	z,idxinhl
+	inc	(hl)		;nee, verhoog minimum index
+	ld	a,(hl)
+	ld	hl,newbuf+1
+	cp	(hl)		;wijzer te laag?
+	jr	c,idxinhl
+	ld	(hl),a		;ja, verhoog de 'wie gaat eruit' index
+idxinhl:ex	de,hl		;indexadres in HL
+	jr	copyidx		;en verplaats record
+
+
+	;het gewenste record staat nog niet in het geheugen...
+chress:	ld	a,e
+restrk2:cp	0		;record gereserveerd track?
+	jr	c,ressec	;ja, buffer 0 gebruiken
+
+isdirsc:jr	searfp		;ook ev. bij directory sector
+
+ressec:	ld	l,0
+	call	wsector		;schrijf sector (HL) eventueel
+	ld	l,0
+	jr	copyidx		;en lees gewenste sector
+
+
+	;wanneer er geen 64K RAM is...
+chbuchg:push	de
+	call	flush		;schrijf ev. veranderde buffer naar disk
+	pop	hl		;en kopieer gewenste gegevens
+	jr	copytbu
+
+mkplace:call	flush		;geen vrije plaatsen meer, flush de buffer
+
+	;zoek een plaatsje in de buffer
+searfp:	ld	bc,256+57	;B=minimale index, C=aantal buffers
+newbuf:	ld	hl,sectchg+1	;de 'nieuwe buffer' index
+	ld	e,l		;oude index in E
+
+seanoc:	inc	l		;verhoog index
+	ld	a,l
+	cp	c		;maximale waarde overschreden?
+	jr	c,cpsame
+	ld	a,b
+	ld	l,b		;ja, index op minimale waarde
+	djnz	cpsame		;verlaag minimale waarde
+	inc	b		;minimum mag niet lager dan 1 zijn
+cpsame:	cp	e		;geen vrije plaatsen gevonden?
+	jr	z,mkplace	;nee, flush de buffer
+	bit	7,(hl)		;naar deze sector geschreven?
+	jr	nz,seanoc	;ja, laat zitten
+
+	ld	a,28h		;opcode JR Z,...
+	ld	(cleared),a	;buffer bevat sector(en)
+
+	ld	a,b
+	ld	(searfp+2),a	;bewaar nieuwe minimum index
+	ld	(newbuf+1),hl	;bewaar nieuw index
+
+copyidx:call	calcubu		;bereken bufferadres
+	dec	h
+	ld	l,(hl)		;haal data adres van index (HL) 
+	dec	h
+	ld	de,(curtrk+1)
+	ld	(hl),e		;nieuwe buffergegevens in tabel plaatsen
+	dec	h
+	ld	(hl),d
+	ex	de,hl
+
+copytbu:ld	(chinbuf+1),hl
+
+preread:call	rdsec		;preREAD nodig? lees de sector
+
+dmasec:	ld	a,(curbll+2)	;bereken sectorindex
+
+curand:	and	0		;momentele AND masker
+	rra			;recordindex:= (sectorlengte AND masker) * 128
+	ld	d,a
+	ld	e,0
+	rr	e
+curbuf:	ld	hl,secbuf	;momentele buffer adres
+	add	hl,de		;+ index = werkelijke adres
+
+curdma:	ld	de,0		;het BDOS DMA adres
+
+	call	psg15		;selecteer PSG bankswitch poort
+
+selbnk1:ld	bc,0DDDDh	;B=buffer bankselect, C=BDOS bankselect
+
+	jr	z,rwflag	;CAPS LOCK intact laten
+
+selbnk2:ld	bc,0FDFDh
+
+rwflag:	jr	movrec
+
+	ld	a,0CDh
+bufidx:	ld	(bufchg),a	;schrijven, zet de 'buffer is beschreven' vlag
+	ex	de,hl		;verwissel bron en doeladres
+	ld	a,b
+	ld	b,c
+	ld	c,a		;verwissel bron en doelbank
+
+movrec:	ld	a,b
+	out	(psgwr),a	;selecteer bronbank
+	ld	(ldsrc+1),hl	;bronadres in operand schrijven
+
+	ex	af,af'
+	ld	a,c
+	out	(psgwr),a	;selecteer doelbank
+
+	ld	(spback+1),sp	;bewaar stackpointer in doelbank
+
+	ld	a,8		;8 keer 16 bytes
+	ld	(movcnt),a
+	ld	a,c
+
+	ld	hl,16		;1e doeladres in operand (16 verder vanwege
+	add	hl,de		;			de PUSH instructies)
+
+movloop:ld	(lddst+1),hl	;in operand
+
+	ex	af,af'		;selecteer bronbank
+	out	(psgwr),a
+ldsrc:	ld	sp,0		;bronadres
+	pop	bc		;lees 16 bytes in de registers
+	pop	de
+	pop	hl
+	exx
+	pop	bc
+	pop	de
+	pop	hl
+	pop	ix
+	pop	iy
+	ld	(ldsrc+1),sp	;schrijf nieuw bronadres
+
+	ex	af,af'		;selecteer doelbank
+	out	(psgwr),a
+lddst:	ld	sp,0		;doeladres
+	push	iy		;16 bytes naar doelbank schrijven
+	push	ix
+	push	hl
+	push	de
+	push	bc
+	exx
+	push	hl
+	push	de
+	push	bc
+
+	ld	hl,movcnt	;verlaag teller
+	dec	(hl)
+
+	ld	hl,32		;bereken nieuw doeladres
+	add	hl,sp
+
+	jr	nz, movloop	;ev. volgende
+
+spback:	ld	sp,0		;herstel de stackpointer
+	call	bank20		;schakel terug naar BDOS bank
+	ei
+
+chdirs:	jr	endrw		;skip ev. directory check
+
+	ld	a,(rwflag)
+	cp	3Eh		;soms naar directory geschreven?
+	call	z,flush		;ja, alle veranderde sectoren naar schijf
+
+evdirc:	jr	endrw		;klaar wanneer er geen 64K RAM is..
+
+	ld	hl,(curdma + 1)	;HL=beginadres van directory sector
+	xor	a
+
+caldcs:	add	a,(hl)		;bereken checksum over directory sector
+	inc	l
+	jp	nz,caldcs
+
+	ld	hl,curtrk+2
+	ld	c,(hl)		;drive in C
+	ld	de,checka	;adres van drive A checksum tabel
+	bit	7,c		;drive A?
+	jr	z,calcsa
+	ld	de,checkb	;nee, adres van drive B checksum tabel
+
+calcsa:	ld	hl,(curbll+2)
+	ld	h,0
+	add	hl,de		;HL=adres van checksum van dit record
+
+	cp	(hl)		;klopt de checksum?
+	ld	(hl),a		;schrijf nieuwe checksum
+	jr	z,endrw 	;checksum klopt... ok
+
+	ld	a,(rwflag)
+	cp	3Eh		;soms naar directory geschreven?
+cleared:jr	z,endrw 	;ja, logisch dat checksum veranderd is
+
+	ld	a,18h		;opcode JR ...
+	ld	(cleared),a	;sectorbuffer pas gewist
+
+	call	cbottom		;geef in sector RAM gereserveerde deel vrij
+
+	ld	hl,sectdrs	;alle sectoren van deze drive uit de buffer
+
+chdrnr:	dec	l
+	dec	l		;gereserveerde sector laten zitten
+	jr	z,endrw
+	inc	l
+	ld	a,(hl)		;haal drive/sector byte
+	xor	c		;sector van deze drive?
+	jp	m,chdrnr
+	ld	(hl),h		;ja, wis drive/sector
+	call	getidx
+	inc	h
+	ld	(hl),0		;en wis veranderd bit
+	ex	de,hl
+	jr	chdrnr
+
+endrw:	ld	a,0CDh		;FLUSH tijdens interrupt weer toestaan
+	ld	(enaflsh),a
+
+	xor	a		;geen I/O error, terug met A=0
+dioerf:	ret			;RET of LD A,0C9h (bij fout)
+
+	db	0C9h
+	ld	(dioerf),a
+
+	ld	a,255		;terug met A<>0
+	ret
+
+;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+	;schrijf alle veranderde sectoren naar schijf
+flush:
+bufchg:	ld	de,wrsec	;schrijf ev. de sector naar schijf
+	ret
+
+lowest:	ld	hl,searfp+1	;aantal sectorbuffers 
+	ld	b,(hl)		;in B
+	ld	c,255		;reset C
+
+lowest1:ld	l,b		;HL wordt index in sector veranderd tabel
+	dec	l
+	ld	h,high sectchg
+	bit	7,(hl)		;deze sector veranderd?
+	jr	z,lowestn	;nee, bekijk volgende
+
+	dec	h		;wijs op index byte
+	ld	l,(hl)		;index in L
+	dec	h		;wijs op tracknummer
+
+	push	af		;bewaar 'zoekfase'
+	or	a		;zoekfase 0?
+	jr	nz,lowest2
+	dec	h		;ja, haal drive nummer van deze buffer
+	ld	a,(hl)
+	and	80h
+	jr	lowestc		;vergelijk met C
+
+lowest2:dec	a		;zoekfase 1?
+	jr	nz,lowest3
+	dec	h		;ja, drive nummer gelijk?
+	ld	a,(hl)
+	xor	d
+	jp	m,lowestr	;nee, overslaan
+	inc	h		;haal tracknummer
+	ld	a,(hl)
+	jr	lowestc		;vergelijk met C
+
+lowest3:ld	a,(hl)		;tracknummer gelijk?
+	cp	e
+	jr	nz,lowestr	;nee, overslaan
+	dec	h
+	ld	a,(hl)		;drive nummer gelijk?
+	xor	d
+	jp	m,lowestr	;nee, overslaan
+
+lowestc:cp	c		;accu lager dan C?
+	jr	nc,lowestr
+	ld	c,a		;ja, C=laagste waarde
+
+lowestr:pop	af		;herstel 'zoekfase' teller
+
+lowestn:djnz	lowest1		;bekijk volgende sector
+	inc	c		;veranderde sector gevonden?
+	jr	nz,cinreg
+	dec	a		;nee, verlaag 'zoekfase'
+
+	ret	m
+	jr	lowest
+
+cinreg:	dec	c		;herstel laagste waarde
+	push	af		;bewaar zoekfase
+	or	a		;zoekfase 0?
+	jr	nz,cinreg1
+	ld	d,c		;ja, laagste gevonden drive naar D
+	jr	cinregr
+
+cinreg1:dec	a		;zoekfase 1?
+	jr	nz,cinregr
+	ld	e,c		;ja, laagste gevonden track naar E
+
+cinregr:pop	af		;herstel zoekfase
+	inc	a		;verhoog zoekfase
+	cp	3		;drive, track en sector bekeken?
+	jr	nz,lowest	;nee, volgende fase
+	dec	a		;herstel zoekfase 2
+
+	push	de		;bewaar track en drive
+	push	af		;bewaar zoekfase
+	ld	a,c		;meng sector met drive
+	or	d
+	ld	d,a
+	call	inbuf?		;haal sector data adres
+	call	getidx		;haal sectorindex byte adres
+	call	wsector		;wis vlag en schrijf sector
+	pop	af
+	pop	de
+	jr	lowest		;zoek volgende beschreven sector
+
+
+	;kijk of de (gewenste) sector (DE) in de extra 64k staat
+	;zoja, terug met Z=1, HL=adres van track
+
+inbuf?:	ld	bc,(searfp+1)	;C=aantal sectorbuffers
+	ld	hl,sectdrs	;adres van drive/sector tabel
+	ld	b,l		;B=0
+
+searlp:	ld	a,d		;gewenste drive/sector in A
+	cpir			;zoek overeenkomend drive/sectornummernummer
+	ret	nz		;niet? terug
+	inc	h
+	dec	l
+	ld	a,e
+	cp	(hl)		;klopt tracknummer ook?
+	ret	z		;ja, ok
+	dec	h
+	inc	l
+	ld	a,c		;klaar?
+	or	a
+	jr	nz,searlp	;nee, volgende
+	inc	a		;niet gevonden, Z=0
+	ret
+
+	;zoek het adres van het indexbyte dat bij drive/sector/track (HL) hoort
+
+getidx:	ex	de,hl		;adres van databytes in DE
+	ld	hl,sectidx
+	ld	a,e
+
+seaidx:	cp	(hl)		;is dit de gezochte index?
+	ret	z		;ja, terug
+	inc	l
+	jr	seaidx		;nee, kijk naar volgende
+
+
+	;bereken bufferadres van buffer (HL) en bewaar buffergegevens
+
+calcubu:ld	h,high sectidx
+	ld	a,(hl)		;haal indexbyte
+	inc	h
+	ld	(bufidx+1),hl	;bewaar adres veranderd vlag
+buflen:	jr	buf1024		;offset wordt aan bufferlengte aangepast
+buf1024:add	a,a		;bereken het beginadres van deze buffer
+buf512:	add	a,a
+
+buf256:	ld	(curbuf+2),a	;bewaar nieuwe bufferadres
+	ret
+
+
+	;schrijf sector (index L) naar schijf
+wsector:call	calcubu		;bereken buffer adres
+	bit	7,(hl)		;is sector veranderd?
+	ret	z		;nee, terug
+	ld	(hl),b		;wis veranderd vlag
+	dec	h
+	ld	e,(hl)		;kopieer track/drive/sector gegevens
+	ld	d,high secttrk
+	ld	a,(de)
+	ld	(chinbuf+1),a
+	dec	d
+	ld	a,(de)
+	ld	(chinbuf+2),a
+
+
+	;schrijf een sector van sectorbuffer naar disk
+wrsec:	db	3Eh		;LD A, data (LD A, 0AFh)
+
+
+	;lees een sector van disk naar sectorbuffer
+rdsec:	xor	a		;A=0
+	ld	(rdorwr+1),a	;bewaar de lees/schrijf vlag
+
+
+	;het voor lees en schrijfacties gemeenschappelijk gedeelte...
+trysix:	ld	a,6		;maximaal 6 pogingen bij lees/schrijffouten
+	ld	(trycnt),a
+
+tryone:	di
+	call	disslpr		;SELECT en PRINT routines verbieden
+
+	ld	hl,olddrv	;drivenummer van vorige lees/schrijf actie
+	ld	a,(chinbuf+2)	;gewenste drive
+	and	80h		;bitnummer in bit 7
+	cp	(hl)		;van diskdrive veranderd?
+	ld	(hl),a		;bewaar nieuw drivenummer
+	ld	b,a		;drive in B
+	jr	z,seldrv	;nee, selecteer drive
+
+	call	clrtrck		;oude tracknummers gelden niet meer
+
+	inc	hl		;HL wijst op bewaarde DRIVE A FD trackregister
+	in	a,(fdctrck)	;lees FD-1793's track register
+	bit	7,b		;drive A gewenst?
+	jr	nz,drbnew
+	inc	hl		;ja, bewaar drive B's trackregister
+	ld	(hl),a
+	dec	hl		;en wijs op die van drive B
+	db	11h		;dummy LD DE, data16
+drbnew:	ld	(hl),a		;bewaar drive A's trackregister
+	inc	hl		;en wijs op die van drive B
+
+	ld	a,(hl)		;output trackregister van gewenste drive
+	out	(fdctrck),a
+
+seldrv:	ld	de,drvsel+1
+	ld	a,(de)
+	ld	c,a		;momentele driveselect in C
+
+	ld	hl,formata	;wijs op drive A formaat en drive tracknummer
+	ld	a,0Dh		;selecteer drive A
+
+	bit	7,b		;drive A gewenst?
+	ld	b,4		;A's 40/80 track masker 
+	jr	z,startmt
+
+	ld	hl,formatb	;wijs op drive B formaat en drive tracknummer
+	inc	a		;selecteer B
+	ld	b,8		;B's 40/80 track masker
+
+startmt:ld	(de),a		;nieuwe drive select uitgang
+	bit	2,c		;motoren aangezet?
+	jr	nz,seledr	;nee, selecteer drive
+	ld	c,a		;drive select even in C
+	ld	a,12
+	out	(fddrsel),a	;zet eerst motoren aan
+	ld	de,stopdrv
+	ld	a,-1
+	ld	(de),a
+	ei
+
+waistm: ld	a,(de)		;wacht ongeveer 0.75 seconde, zodat de
+	cp	-38		;		motoren op toeren komen kunnen
+	jr	nz,waistm
+	ld	a,c		;drive select
+
+seledr:	out	(fddrsel),a	;selecteer drive
+	ld	de,0FF40h	;reset de interrupt 'drive select uit' teller
+	ld	(stopdrv),de	;en de motor uit teller
+	ei
+
+chtrck:	ld	c,0		;C=kopie sideselect output
+
+	ld	e,(hl)		;drive formaat in E
+	inc	hl
+	ld	d,(hl)		;drive tracknummer in D
+	push	hl		;adres van tracknummer
+
+	inc	hl
+	ld	a,(hl)		;1e sectornummer boven
+	ld	(sid0max+1),a
+	inc	hl
+	ld	a,(hl)		;formaat veranderd vlag
+	ld	(hl),0		;gelijk wissen
+	inc	hl
+
+	push	af
+	ld	a,(hl)		;haal ev. adres sector vertalings tabel
+	inc	hl
+	ld	h,(hl)
+	ld	l,a
+	pop	af
+	ld	(sectrn+1),hl
+
+	pop	hl		;(HL)=tracknummer
+
+	or	a		;formaat veranderd?
+	jr	z,chtrsm	;nee, vergelijk tracknummers
+
+	push	de
+	ld	a,b
+	and	c		;bekijk oude 40/80 tracks formaat
+	ld	e,a
+	jr	z,resto		;was 40 tracks.. ok
+	set	2,e		;bit 2 van E moet 1 zijn
+resto:	call	restore		;drive eerst naar track nul
+	pop	de
+	ld	a,b
+	cpl
+	and	c		;wis 40/80 tracks bit van deze drive
+	bit	2,e		;is de drive 40 tracks?
+	jr	z,nwltch
+	or	b		;zet het 40/80 tracks bit
+nwltch:	ld	c,a
+	out	(sidesel),a	;zet 40/80 tracks latch
+	ld	(chtrck+1),a	;bewaar side select
+
+	call	delay		;wacht even, ivm relais traagheid
+
+	ld	d,0D0h		;altijd naar nieuwe track 'zoeken'
+
+chtrsm:	ld	a,(chinbuf+1)	;is het tracknummer nog hetzelfde?
+	cp	d
+	jr	z,outsect
+
+	ld	(hl),a		;bewaar nieuwe tracknummer
+	ld	d,a
+
+	res	0,c		;selecteer double density
+	res	1,c		;selecteer side 0
+
+	bit	0,e		;single density drive?
+	jr	nz,convtrk
+	set	0,c		;ja, selecteer single density
+
+convtrk:bit	4,e		;drive met even tracknummer onder?
+	jr	z,chtohi
+	srl	a		;track/2: track oneven? selecteer bovenkant
+	jr	nc,seektr
+	jr	selup
+
+chtohi:	ld	b,40
+	bit	2,e		;40 tracks?
+	jr	z,chhitrk
+
+	ld	b,80		;nee, vergelijk met 80
+chhitrk:ld	a,d
+	cp	b		;is het tracknummer te hoog?
+	jr	c,seektr	;nee, track zit aan de onderkant
+	sub	b		;anders er 40 of 80 vanaf trekken
+
+selup:	set	1,c		;selecteer side 1
+
+seektr:	out	(fdcdata),a	;gewenste tracknummer doorgeven
+
+	ld	a,(restore+1)	;gewenste stappenmotorsnelheid
+	or	10h		;+SEEK commando
+	call	comtofd
+
+rdorwr:	scf			;lezen (carry 1)
+	nop			;schrijven? (dan staat hier XOR A --> carry 0)
+	call	nc,delay	;ja, laat de koppen ca. 30mS 'uittrillen'
+
+outsect:push	bc
+	ld	a,(chinbuf+2)	;gewenste sector
+	and	7Fh
+	ld	c,a
+
+sectrn:	ld	hl,0		;HL=adres vertaaltabel of 1e sectornummer
+	ld	a,h
+	ld	b,0
+	add	hl,bc		;HL=adres van sector of sectornummer zelf
+
+	or	a		;sectorvertaling doen?
+	ld	a,l		;nee, L is het sectornummer
+	jr	z,sectfdc
+
+	ld	a,(hl)		;ja, haal sectornummer uit de tabel
+
+sectfdc:out	(fdcsect),a	;naar FDC
+	pop	bc
+
+	bit	6,e		;sectoren boven en onder (i.p.v. 2 tracks)
+	jr	z,selsid
+	res	1,c
+sid0max:cp	0		;ja, sector op bovenkant?
+	jr	c,selsid	;nee, onder
+	set	1,c		;ja, selecteer bovenkant
+
+selsid:	ld	a,c
+	ld	(chtrck+1),a	;bewaar side select
+	ld	hl,(curbuf+1)	;begin van sector buffer
+
+selside:di
+	out	(sidesel),a	;selecteer zijde
+	ld	(sdsl+1),a	;side select bewaren
+
+	ld	b,0		;wis inverse opcode.... (NOP)
+	bit	7,e		;data inverteren?
+	jr	z,chrdwr
+	ld	b,2Fh		;ja, zet inverse opcode (CPL)
+
+chrdwr:	ld	a,(rdorwr+1)	;haal lees/schrijf vlag
+	or	a		;sector lezen of schrijven?
+	jr	nz, setwr
+
+	ld	d,1Ch		;lees error masker
+	push	de		;bewaar error masker en diskformaat
+
+	ld	a,80h			  ;lees sector commando
+	ld	e,b			  ;NOP of CPL
+	ld	d,77h	 		  ;opcode LD (HL),A
+	ld	bc, fdcdata shl 8 + 0DBh  ;code IN A,(FDCDATA)
+	jr	givecom
+
+setwr:	ld	d,7Ch		;schrijf error masker
+	push	de		;bewaar error masker en disk formaat
+
+	ld	a,0A0h			 ;schrijf sector commando
+	ld	c,7Eh			 ;opcode LD A,(HL)
+	ld	de, fdcdata shl 8 + 0D3h ;code OUT (FDCDATA),A
+
+givecom:out	(fdccomm),a	;geef lees/schrijf opdracht aan FDC
+
+	call	bank32		;schakel eventueel andere 64K RAM in
+
+	ld	(rwcode),bc	;programma aanpassen (lees/schrijf + inversie)
+	ld	(rwcode + 2),de
+
+	ld	bc,0		;wis Time out teller
+
+rdwr1:	in	a,(fdcdrq)
+	add	a,a		;DATAREQUEST?
+	jp	m,rwcode	;ja, lees/schrijf byte
+
+	djnz	rdwr2
+
+	in	a,(fdcdrq)
+	add	a,a		;DATAREQUEST?
+	jp	m,rwcode	;ja, lees/schrijf byte
+
+	dec	c
+	jr	z,offlin	;C nul? geen disk....
+
+rdwr2:	in	a,(fdcdrq)
+	add	a,a		;DATAREQUEST?
+	jp	p,rdwr3
+
+rwcode:	in	a,(fdcdata) ;LD  A,(HL)      --> bij schrijven		
+	nop		    ;NOP             --> CPL bij geinverteerde data
+	ld	(hl),a	    ;OUT (FDCDATA),A --> bij schrijven
+	inc	hl
+	ld	c,0		;er kan geen time out meer ontstaan
+
+rdwr3:	in	a,(fdcdrq)
+	add	a,a		;DATAREQUEST?
+	jp	m,rwcode	;ja, lees/schrijf byte
+
+	jr	nc,rdwr1	;nee, wacht
+
+	call	bank20		;bank 20 weer inschakelen
+
+	pop	de		;herstel disk formaat en error masker
+
+	in	a,(fdcstat)	;lees FDC status register na INTRQ
+	and	d		;meng met foutmasker
+	jr	nz,rwerr	;geen fout?
+
+	in	a,(fdcsect)
+	cp	6		;sector 6 gelezen/geschreven?
+	jr	nz,rwret	;nee, ok
+	bit	5,e		;80 track C.U.C. formaat?
+	jr	z,rwret		;nee, ok
+
+sdsl:	ld	a,0		;de bewaarde sideselect output
+	bit	1,a		;geheel gelezen/geschreven?
+	set	1,a
+	jp	z,selside	;nee, lees/schrijf de bovenkant
+	jr	rwret
+
+rwerr:	call	restore		;RESTORE commando na fout
+
+	call	clrtrck		;wis bewaarde tracknummers
+
+	ld	hl,trycnt
+	dec	(hl)		;probeer het ev. nog eens
+	jp	nz,tryone
+	
+	ld	a,3Eh
+	ld	(dioerf),a	;zet R/W error vlag
+
+rwret:	ld	a,11h
+	ld	(bufchg),a	;wis buffer veranderd status
+				;reset de na een in de buffer gevonden sector
+	ld	(noprer+1),a	;te schrijven opcode (kan 0CDh worden)
+
+	ei
+	jp	enaslpr		;SELECT en PRINT mogen weer (en RETURN)
+
+
+;er zit geen diskette in de drive....
+
+offlin:	call	bank20 		;bank 20 weer inschakelen
+
+	pop	de		;disk formaat
+
+	ld	a,0D0h		;breek het lees/schrijf commando af
+	out	(fdccomm),a
+
+	ld	de,notrdy	;'No disk' foutmelding
+error:	call	txtl25
+	call	waikey		;wacht op een toets
+	push	af
+	call	rstl25		;herstel onderste regel
+	pop	af
+	cp	' '		;spatiebalk ingedrukt?
+	jp	z,trysix	;ja, probeer 't nog eens
+
+	call	enaslpr
+
+	ld	hl,4
+	ld	a,(hl)		;LOGIN drive A
+	and	0F0h
+	ld	(hl),a
+	rst	0		;warme start
+
+
+	;foutmelding wanneer er geen (goede) diskette inzit
+notrdy:	db	'No disk',0
+
+
+	;huidige drive naar track 00
+restore:ld	a,0		;restore commando (+snelheid)
+
+	;geef een SEEK of RESTORE opdracht. Bij een 80 tracks drive wordt ev.
+	;de FDC op een 2mHz klok gezet zodat stappenmotoren hun pulsen per
+	;3mS kunnen krijgen.
+
+comtofd:
+	out	(fdccomm),a	;geef RESTORE of SEEK commando
+	bit	2,e		;80 tracks drive?
+	jr	z,skorrs	;nee, niets doen..
+	ld	a,(chtrck+1)
+	set	4,a
+	out	(sidesel),a	;ja, selecteer ev. de 2mHz klok
+skorrs:	ld	a,18
+skordel:dec	a
+	jr	nz,skordel
+
+waidon:	in	a,(fdcstat)	;wacht tot dat commando uitgevoerd is
+	rra
+	jr	c,waidon
+	ret
+
+
+	;ongeveer 30 (6 MHz) of 50 (3.58 MHz) milliseconde vertraging
+
+delay:	ld	a,50
+delaya:	djnz	delaya
+	dec	a
+	jr	nz,delaya
+	ret
+
+
+	;wis de tracknummers van beide drives zodat een volgende lees/schrijf
+	;actie altijd tot een SEEK opdracht leidt.
+clrtrck:ld	a,200		;oude tracknummers gelden niet meer
+	ld	(drtrcka),a
+	ld	(drtrckb),a
+	ret
+
+;------------------------------------------------------------------------------
+subttl Diverse subroutines
+page
+	;schakel eventueel over naar extra 64K RAM bank
+bank32:	ret			;CALL PSG15 wanneer er 64K ram is
+	dw	psg15		;
+
+	pop	ix		;terugkeeradres
+	or	11010011b	;selecteer pagina 31 en 22
+	out	(psgwr),a
+	jp	(ix)
+
+
+	;schakel terug naar de normale 64K RAM bank
+bank20:	ret	
+	dw	psg15
+
+	pop	ix		;terugkeeradres
+	or	11011101b	;selecteer pagina 21 en 02
+	out	(psgwr),a	;selecteer bank
+	jp	(ix)		;en terug
+
+
+	;(her) LOGIN huidige drive
+relogi:	ld	a,(drive+1)
+	rrca
+	ld	e,a		;login huidige drive
+	jp	0E421h		;BDOS login routine (CALL 0E421h na opstarten)
+
+
+	;bereken max. aantal buffers en bufferlengte
+clixev:	ret			;LD DE,15 bij aanwezigheid extra 64K
+	dw	15 		;offset in formaat tabel
+	ld	hl,(dphdra+10)
+	add	hl,de
+	ld	b,(hl)		;B= sector shift van drive A
+	ld	hl,(dphdrb+10)
+	add	hl,de
+	ld	a,(hl)		;A=sector shift van drive B
+	cp	b		;is B hoger?
+	jr	nc,stbl
+	ld	a,b		;ja, hoogste getal geldt
+
+stbl:	ld	b,a		;B=schuif teller
+	xor	3		;1 wordt 2, 2 wordt 1 en 3 wordt 0
+	ld	(buflen+1),a	;offset in CALCUBU aanpassen
+
+bufl1:	ld	a,230		;maximum aantal bij 128 en 256 byte buffers
+	db	11h		;dummy LD DE,
+shbl:	srl	a
+	djnz	shbl		;aantal buffers ev. door 2 of 4 delen (bij 
+				;		       512 of 1024 byte buffer)
+	ld	(searfp+1),a	;zet het aantal buffers
+
+
+	;wis de sectorindextabel en de drive/sector data
+clsidx:	ld	hl,sectchg+1
+	ld	(newbuf+1),hl	;wis 1e in te lezen sectorbuffer
+	ld	d,h
+	dec	l
+	xor	a
+clseci:	ld	(hl),a		;wis veranderd vlag
+	dec	h
+	ld	(hl),l		;zet index
+	dec	h
+	dec	h
+	ld	(hl),h		;wis drive/sector
+	ld	h,d
+	inc	l
+	jr	nz,clseci	;volgende
+
+cbottom:ld	a,1
+	ld	(searfp+2),a	;geef in sector RAM gereserveerde gedeelte vrij
+	ret
+
+
+	;SELECT en PRINT mogen weer
+enaslpr:ld	a,38h		;opcode JR C,..
+	db	11h		;dummy LD DE,data
+
+	;SELECT en PRINT routines verbieden
+disslpr:ld	a,18h
+
+	ld	(noselpr),a
+	ret
+
+
+	;wacht tot driveselect uit is (zodat ev. veranderde buffers alsnog
+	;door FLUSH weggeschreven kunnen worden)
+waiselo:ei
+	ld	a,(drvsel+1)
+	and	3
+	jr	nz,waiselo
+	ret
+
+
+	;schakel over naar locale stack
+locstck:di
+	pop	hl		;momentele terugkeeradres in HL
+	ld	(nomstck+1),sp	;bewaar stackpointer
+	ld	sp,biostck	;locale stackpointer
+	ld	de,nomstck	;laat terugkeeradres op stack achter
+	ld	a,(iobyte)
+	push	de
+	jp	(hl)		;terug
+
+
+	;schakel over naar normale stack
+nomstck:ld	sp,0		;herstel de bewaarde stackpointer
+	ei
+	ret			;terug (naar BDOS...)
+
+
+	;tel BC bytes vanaf (DE) bij HL op
+chdebc:	ld	a,(de)		;byte uit geheugen
+	inc	de
+	add	a,l		;bij totaal optellen
+	ld	l,a
+	jr	nc,chbcde
+	inc	h
+
+chbcde:	dec	bc		;teller verlagen tot nul
+	ld	a,c
+	or	b
+	jr	nz,chdebc
+	ret
+
+
+	;bereken de checksum over de CCP en BDOS in HL
+chcksum:ld	de,0D000h	;totaliseer D000h - D006h
+	ld	bc,7
+	ld	l,b		;wis de checksum
+	ld	h,b
+	call	chdebc
+
+	ld	e,0B9h		;totaliseer D0B9h - ???
+	ld	bc,0747h
+	call	chdebc
+
+	nop	; inc	d			;totaliseer D800h - DAFFh
+	ld	b,high (0DB00h-0D800h)
+	call	chdebc
+
+	ld	de,checksm	;dit zou het moeten zijn
+
+	;16 bits vergelijking van HL met DE, resultaat in Accu en vlaggen
+cphlde:	ld	a,h
+	sub	d
+	ret	nz
+	ld	a,l
+	sub	e
+	ret
+
+
+	;verhoog HL, controleer HL=maximale printerbufferwaarde
+incspl:	inc	hl
+	ld	de,splend	;printerbufferindex te hoog?
+	call	cphlde
+	ret	nz		;nee, ok
+spoollo:ld	hl,prspbuf	;ja, zet index op minimale waarde
+	ret
+
+
+	;kijk naar de STOP toets, terug met Z=1 als dat zo is
+chctlc:	ei
+	ld	a,(keystat+6)	;haal STOP keyboard status
+	and	20h		;STOP? Zero vlag wordt 1
+	ret
+
+
+	;plaats rij B van kolom C in toetsenbordbuffer
+keyibuf:ld	a,(keystat+6)	;haal SHIFT en CTRL status
+	rra			;SHIFT?
+	jr	c,chctrl
+
+	ld	de,shftkey
+	ld	a,c		;rij lager dan 8?
+	cp	8
+	jr	c,rowok		;ja, SHIFT ok
+	jr	norm
+
+chctrl:	rra			;CTRL?
+	jr	c,norm
+
+	ld	de,ctrlkey-16
+	ld	a,c		;C in rij 2..5?
+	cp	6
+	jr	nc,norm		;nee, niet goed
+	cp	2
+	jr	nc,rowok
+
+norm:	ld	de,normkey	;geen SHIFT of CTRL
+
+rowok:	ld	a,c		;row * 8
+	add	a,a
+	add	a,a
+	add	a,a
+	add	a,e		;bij begin optellen
+	ld	e,a
+	jr	nc,keyinc
+	inc	d
+keyinc:	ld	c,b		;ingedrukte toetsen in C
+	ld	b,8
+	ld	hl,(keybidx+1)	;toetsenbordbufferindex
+rowinb:	rl	c		;1 bit in carry
+	jr	nc,nxtrwbt	;toets ingedrukt? nee, niet in buffer zetten
+
+	ld	a,(de)		;toets uit tabel
+	cp	255		;geen?
+	jr	z,nxtrwbt
+
+	cp	128		;functietoets?
+	jr	c,tinb
+	cp	138
+	jr	nc,tinb		;nee, toets naar buffer
+
+	push	de		;even bewaren
+	push	bc
+	ld	e,a		;functietoetsnummer met 12 vermenigvuldigen
+	add	a,a		;*2
+	add	a,e		;*3
+	add	a,a		;*6
+	add	a,a		;*12
+	add	a,low fkey	;+beginadres van functietoetsen
+	ld	e,a
+	ld	a,high fkey	;hoge gedeelte daarvan
+	adc	a,0		;+carry
+	ld	d,a
+	ld	b,12		;max. 12 tekens per functietoets
+
+finb:	ld	a,(de)		;teken uit functietoets spec.
+	inc	de
+	or	a		;einde?
+	jr	z,rsfrg
+	ld	(hl),a
+	ld	a,l
+	cp	low (keybuf+keyblen-1)	;buffer vol?
+	jr	z,rsfrg			;ja, klaar
+	inc	hl
+	djnz	finb		;max 12 tekens
+
+rsfrg:	pop	bc		;herstellen
+	pop	de
+	jr	click		;en klikje geven
+
+tinb:	cp	'a'		;kleine letter?
+	jr	c,ainb
+	cp	'}'+1
+	jr	nc,ainb
+
+capstat:sub	0		;ev. 32 ervanaf zodat een grote letter ontstaat
+
+ainb:	ld	(hl),a		;enkel teken naar toetsenbordbuffer
+	ld	a,l
+	cp	low (keybuf+keyblen-1)	;buffer vol?
+	jr	z,nxtrwbt		;nee, bufferindex niet ophogen
+	inc	hl
+
+click:	ld	a,15
+	out	(wrppicr),a	;CLICK
+
+clckdel:dec	a
+	jr	nz,clckdel
+
+	ld	a,autores	;lange autorepeat tijd
+	ld	(autorep),a
+
+	ld	a,14		;CLICK puls uit
+	out	(wrppicr),a
+
+nxtrwbt:inc	de		;volgende toets
+	djnz	rowinb
+	ld	(keybidx+1),hl
+	ret			;klaar met KEYINB
+
+
+	;de ASCII codes die bij de diverse toetsen horen. Wanneer de code 255
+	;is levert een toets niets op
+
+	;normale toetscodes				;RIJ (C register)
+normkey:db	'7', '6', '5', '4', '3', '2', '1', '0'	; 0
+	db	'/', '.', '=', ',', "'", ':', '9', '8'	; 1
+	db	'g', 'f', 'e', 'd', 'c', 'b', 'a', '~'	; 2
+	db	'o', 'n', 'm', 'l', 'k', 'j', 'i', 'h'	; 3
+	db	'w', 'v', 'u', 't', 's', 'r', 'q', 'p'	; 4
+bckrow:	db	  5,   8, '}', '|', '{', 'z', 'y', 'x'	; 5
+lrgrow:	db	 19,  13,  21,  27,   6,   1, 255, 255	; 6 Right/Left Graph
+	db	 24,  22,  12, 136, 134, 132, 130, 128	; 7
+selrow:	db	  4, 255,  16, 255, 255, 127,   9, ' '	; 8
+	db	'7', '6', '5', '4', '3', '2', '1', '0'	; 9 (num.) toetsenbord
+	db	',', '.', '/', '*', '-', '+', '9', '8'	;10
+
+	;wanneer de shifttoets ingedrukt is
+shftkey:db	'&', '^', '%', '$', '#', '@', '!', ')'	; 0
+	db	'?', '>', '+', '<', '"', ';', '(', '*'	; 1
+	db	'G', 'F', 'E', 'D', 'C', 'B', 'A', '_'	; 2
+	db	'O', 'N', 'M', 'L', 'K', 'J', 'I', 'H'	; 3
+	db	'W', 'V', 'U', 'T', 'S', 'R', 'Q', 'P'	; 4
+	db	 18,   8, ']', '\', '[', 'Z', 'Y', 'X'	; 5
+	db	'-',  13,   3,  27, '`',   0, 255, 255	; 6 Right/Left Graph
+	db	  3,  18,  12, 137, 135, 133, 131, 129	; 7
+
+	;bij de CTRL toets
+ctrlkey:db	  7,   6,   5,   4,   3,   2,   1,  31	; 2
+	db	 15,  14,  13,  12,  11,  10,   9,   8	; 3
+	db	 23,  22,  21,  20,  19,  18,  17,  16	; 4
+	db	 30,   8,  29 , 28 , 27,  26,  25,  24	; 5
+
+	;de functietoets inhoud: 12 tekens per functietoets
+fkey:	db	'd','i','r',' ','a',':', 13,  0,  0,  0,  0, 0
+	db	'd','i','r',' ','b',':', 13,  0,  0,  0,  0, 0
+	db	's','d',' ','a',':', 13,  0,  0,  0,  0,  0, 0
+	db	's','d',' ','b',':', 13,  0,  0,  0,  0,  0, 0
+	db	'g','o', 13,  0,  0,  0,  0,  0,  0,  0,  0, 0
+	db	'e','r','a',' ',  0,  0,  0,  0,  0,  0,  0, 0
+	db	'n','s','w','e','e','p', 13,  0,  0,  0,  0, 0
+	db	'w','a','s','h', 13,  0,  0,  0,  0,  0,  0, 0
+	db	't','y','p','e',' ',  0,  0,  0,  0,  0,  0, 0
+	db	'a','u','t','o','e','x','e','c', 13,  0,  0, 0
+
+fktbeg:	db	-96
+
+	;de, per functietoets, zichtbare tekst: 6 tekens per functietoets
+fktxt:	db	'1'-128, 'dir a:', -96
+	db	'6'-128, 'dir b:', -96
+	db	'2'-128, ' sd a:', -96
+	db	'7'-128, ' sd b:', -96
+	db	'3'-128, '  go  ', -96
+	db	'8'-128, ' era  ', -96
+	db	'4'-128, 'nsweep', -96
+	db	'9'-128, ' wash ', -96
+	db	'5'-128, ' type ', '1'-128
+	db	'0'-128, ' auto ', -96
+	db	0
+
+	;print B bytes van data tabel (HL) naar vram positie ((SP))
+prlrtxt:pop	ix		;terugkeeradres in IX, (SP) bevat nu VRAM adres
+	add	a,a
+	ld	a,' '		;VRAM code offset 'NORMAAL'
+	jr	nc,edintro	;normaal printen?
+	ld	a,'>'
+
+edintro:ex	(sp),hl
+	inc	hl
+	call	wrahl
+	inc	hl
+	ex	(sp),hl
+
+prlrtxl:ld	a,(hl)
+	or	a		;nul? (einde toetsinhoud)
+	jr	nz,atoc		;nee, volgende
+	ld	a,' '		;ja, spatie
+
+atoc:	cp	32		;CTRL code?
+	jr	nc,addcode
+	set	5,d		;ja, zet vlag
+	ld	a,'^'		;print eerst het 'dakje'
+
+addcode:ex	(sp),hl
+	call	wrahl
+	inc	hl
+	ex	(sp),hl
+	bit	5,d		;CTRL code?
+	jr	z,nxtcode	;nee, volgende
+	res	5,d		;ja, wis vlag
+	ld	a,(hl)
+	add	a,'@'		;print '^A'...'^[' bij CTRL codes
+	jr	addcode
+
+nxtcode:inc	hl
+	djnz	prlrtxl
+	jp	(ix)		;en terug
+
+	;blokkeer de PRINT en SELECT routine en print tekst (DE) op regel 25
+txtl25:	di
+	call	disslpr		;verbied SELECT en PRINT
+	ld	hl,keybidx+1	;leeg de toetsenbordbuffer
+	ld	(hl),low keybuf
+	call	eron		;wis de onderste regel
+	jr	pronl		;print de tekst / foutmelding
+
+	;geef de functietoetstekst op regel 25 weer
+dispfnk:ld	de,fktxt	;begin Ftoets tekst
+	ld	a,18h		;zet functietoetsen aan vlag
+	ld	(fkdisp),a
+
+pronl:	ld	hl,crtvram+24*80 ;VRAM beginadres onderste regel
+pronll:	ld	a,(de)		;haal 1 letter
+	or	a		;klaar?
+	ret	z		;ja, terug
+	ld	c,96		
+	rla			;normal? (MSB=1)
+	jr	nc,invoc	;nein-> also invers - alles klar!
+	ccf			;ja  -> a=a-128 (:= ASCII Code)
+	ld	c,0		;inversen Offset loeschen
+invoc:	rra
+	call	wrachl
+	inc	de
+	inc	hl
+	jr	pronll		;volgende letter
+
+
+	;herstel de onderste regel zoals ie voor TXTL25 bestond
+rstl25:	di
+	call	enaslpr		;SELECT en PRINT mogen weer
+
+fkdisp:	jr	dispfnk		;plaats de Ftoetsen of wis regel 25
+
+
+	;wis de onderste (functietoets) regel
+erafnk:	ld	a,3Eh
+	ld	(fkdisp),a	;wis Ftoets vlag
+
+eron:	ld	hl,crtvram+24*80;VRAM beginadres 25e regel
+	jp	era80		;wis die regel
+
+
+	;selecteer register 15 van de PSG
+psg15:	di
+	ld	a,15
+	out	(psgsel),a
+	in	a,(psgrd)
+	and	20h
+	ret
+
+	;de RS-232 buffers moeten op een paginagrens beginnen (XX00 hex)
+	;de ruimte voor de sector vertalings tabellen wordt net zo lang
+	;als nodig om hierop uit te komen
+
+translt:
+transln	equ	256-low translt
+
+	ds	transln
+
+;------------------------------------------------------------------------------
+subttl Werkgeheugen
+page
+
+	;256 byte lange RS-232 ontvangbuffer in PAGE 21/02
+	;met 64 K RAM begin van default printer buffer in PAGE 31/22
+
+recbuf:	ds	256		;RS-232 ontvang buffer
+
+
+	;zonder 64K RAM: 1024 bytes lange sector buffer
+	;   met 64K RAM: sectorbuffer tabellen in PAGE 21/02
+secbuf:
+				;met 64K RAM in PAGE 21/02...
+sectdrs:ds	256		;sectorbuffer drive/sectoren
+secttrk:ds	256		;sectorbuffer tracknummers
+sectidx:ds	256		;sectorbuffer indextabel
+sectchg:ds	256		;sectorbuffer beschreven vlaggen
+
+
+	;RS-232 zendbuffer, begint op een paginagrens
+trmbuf:	ds	128
+
+
+	;BDOS kladgeheugen voor directory bewerkingen
+dirbuf:	ds	128
+
+
+	;BDOS kladgeheugen; controle locaties voor drive A-B
+chkvca:	ds	64
+chkvcb:	ds	64
+
+
+	;BDOS kladgeheugen; allocatie adressen voor drive A-B
+chalva:	ds	55
+chalvb:	ds	55
+
+
+	;de toetsenbordbuffer
+keybuf:	ds	keyblen
+
+
+	;de variabelen die NIET in de operands van instructies staan....
+autorep:ds	1		;auto repeat herhaal teller
+bellamp:ds	1		;de 'bel' amplitude
+selcnt:	ds	1		;de 'hoe lang geleden op SELECT gedrukt' teller
+stopdrv:ds	1		;drive select uit (na ca. 1.2 seconde)
+stopmot:ds	1		;motoren uit (na ca. 6 seconden)
+
+olddrv:	ds	1		;laatst geselecteerde drive
+trckra:	ds	1		;bewaarde drive A track register
+trckrb:	ds	1		;bewaarde drive B track register
+
+formata:ds	1		;diskformaat A
+drtrcka:ds	1		;bewaarde logische drive A tracknummer
+sid0mxa:ds	1		;max. aantal sectoren onder
+achgd:	ds	1		;formaat A veranderd vlag
+atrans:	ds	2		;ev. drive A sector vertalings tabel
+
+formatb:ds	1		;diskformaat B
+drtrckb:ds	1		;bewaarde logische drive B tracknummer
+sid0mxb:ds	1		;max. aantal sectoren onder
+bchgd:	ds	1		;formaat B veranderd vlag
+btrans:	ds	2		;ev. drive B sector vertalings tabel
+
+esccnt:	ds	1		;escape sequence teller
+
+trycnt:	ds	1		;teller
+
+
+	;toetsenbord debounce buffer
+debounc:ds	11
+
+	;toetsenbord status (een ingedrukte toets geeft een 0 bit)
+keystat:ds	11
+
+
+	;zonder extra 64K RAM is dit de printer buffer
+prspbuf:
+				;met extra 64K RAM...
+checka:	ds	64		;drive A directory checksum tabel
+checkb:	ds	64		;drive B directory checksum tabel
+
+splnd:
+	ds	0-splnd-73	;rest voor printerbuffer
+
+splend:				;einde printerbuffer
+
+movcnt:	ds	1		;'n teller
+
+	;stackruimte voor interrupt routine
+	ds	48
+irqstck:
+
+	;stackruimte voor enkele BIOS routines
+	ds	24
+biostck:
+
+endmem:
+subttl
+end
